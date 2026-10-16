@@ -1,0 +1,79 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The Revit-FREE half of the add-in, compiled on its own: the Core files the headless
+    checks need, and nothing else. It is a separate assembly (not files linked straight into
+    the test runner) for two tools that need code-under-test and tests to be apart:
+
+      * coverage (coverlet) instruments THIS assembly, so the number is about product code,
+        not about the checks themselves;
+      * mutation testing (Stryker.NET) plants defects in THIS project and reruns the tests
+        in ..\LiveClash.LogicTests, which references it.
+
+    It is never shipped and never loaded by Revit; the add-in compiles the same files itself.
+    Members that need a live Revit document carry [RevitBound] and are excluded from the
+    coverage number (they are tested by the in-Revit checks instead).
+  -->
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AssemblyName>LiveClash.Logic</AssemblyName>
+    <RootNamespace>LiveClash</RootNamespace>
+    <!-- Same constants as before the split, so every #if compiles identically. LOGICTESTS_HEADLESS
+         marks code that must not touch an ElementId/XYZ-typed member even to copy it: the RevitAPI
+         package here is metadata-only, so JITting such a method throws FileNotFoundException. -->
+    <DefineConstants>$(DefineConstants);REVIT2025;R24_PLUS;LOGICTESTS_HEADLESS</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Reference-only Revit API: compiles against Element/Parameter/etc. with no Revit install.
+         Flows to the test project, which needs the same metadata to compile the checks. -->
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2025.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The checks reach internal seams (SuppressWrites switches, test resets); the add-in gets the
+         same access by compiling Testing\ into itself in Debug. -->
+    <InternalsVisibleTo Include="LiveClash.LogicTests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\Core\RevitBoundAttribute.cs" Link="Core\RevitBoundAttribute.cs" />
+    <!-- ParameterFilter -> ParamScope (in ParameterReader) -> IdUtil, plus ClashStatusReplay, which
+         depends on nothing at all: it was split out of ClashStatusStore precisely so the ordering
+         rules could be asserted without a Revit document or a real triage file. -->
+    <Compile Include="..\..\Core\ParameterFilter.cs" Link="Core\ParameterFilter.cs" />
+    <Compile Include="..\..\Core\ParameterFilter.Serialization.cs" Link="Core\ParameterFilter.Serialization.cs" />
+    <Compile Include="..\..\Core\ParameterReader.cs" Link="Core\ParameterReader.cs" />
+    <Compile Include="..\..\Core\IdUtil.cs" Link="Core\IdUtil.cs" />
+    <Compile Include="..\..\Core\ClashStatusReplay.cs" Link="Core\ClashStatusReplay.cs" />
+    <Compile Include="..\..\Core\ResolvedLogReplay.cs" Link="Core\ResolvedLogReplay.cs" />
+    <!-- LinkWatch's pure half (notice, wording, age, state machine). The Revit-touching half stays in
+         LinkWatch.cs and is deliberately NOT linked - that split is why this can run here at all. -->
+    <Compile Include="..\..\Core\LinkWatchState.cs" Link="Core\LinkWatchState.cs" />
+    <!-- The panel search's rule: pure, no Revit. -->
+    <Compile Include="..\..\Core\ClashSearch.cs" Link="Core\ClashSearch.cs" />
+    <!-- "What changed" after a link change: the comparison and its state machine. ClashResult is only a data class. -->
+    <Compile Include="..\..\Core\ClashResult.cs" Link="Core\ClashResult.cs" />
+    <Compile Include="..\..\Core\ClashGeometryKindValues.cs" Link="Core\ClashGeometryKindValues.cs" />
+    <Compile Include="..\..\Core\ClashChange.cs" Link="Core\ClashChange.cs" />
+    <Compile Include="..\..\Core\ClashChangeTracker.cs" Link="Core\ClashChangeTracker.cs" />
+    <!-- The sync-study collision guard: pure decision logic (Resolve/RecordedIn); Compute needs a live
+         Document and is exercised only in-Revit. ReadRecorded/Claim do real file I/O and log through
+         Log.cs, which is Revit-free and linked in for exactly that reason. -->
+    <Compile Include="..\..\Core\ModelIdentity.cs" Link="Core\ModelIdentity.cs" />
+    <Compile Include="..\..\Core\ShortHash.cs" Link="Core\ShortHash.cs" />
+    <Compile Include="..\..\Core\Log.cs" Link="Core\Log.cs" />
+    <!-- The export stamp and the CSV quoting rule: pure, no Revit. -->
+    <Compile Include="..\..\Core\CsvText.cs" Link="Core\CsvText.cs" />
+    <Compile Include="..\..\Core\CsvStamp.cs" Link="Core\CsvStamp.cs" />
+  </ItemGroup>
+
+</Project>

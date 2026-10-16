@@ -8,6 +8,11 @@
 #   * compile: net48 / net8 / net10  (Revit 2024 / 2025 / 2026) from NuGet refs,
 #     in Release; plus one Debug build
 #   * logic tests: the Revit-free serialization + migration checks, executed
+#   * coverage of the Revit-free logic above its ratchet (ci/coverage.ps1)
+#   * static analysis: .NET analyzers, nothing in the reliability/security
+#     categories and nothing new beyond ci/analyzers-baseline.txt (ci/analyze.ps1)
+#
+# Mutation testing is slower and runs weekly instead: .github/workflows/mutation.yml.
 #
 # What it CANNOT gate: geometry verification, ClashResult.MakeKey and the
 # BooleanOperations only exist inside Revit's process, so CI cannot run them.
@@ -36,7 +41,7 @@ jobs:
             8.0.x
             10.0.x
 
-      - name: Run CI gate (compile x3 Release + 1 Debug + headless logic tests)
+      - name: Run CI gate (compile x3 Release + 1 Debug + headless logic tests + coverage + static analysis)
         shell: pwsh
         run: ./ci/gate.ps1
 

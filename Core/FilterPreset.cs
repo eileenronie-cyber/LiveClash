@@ -66,7 +66,7 @@ namespace LiveClash.Core
 
             var lines = new List<string>();
             lines.Add(Magic);
-            lines.Add("# exported " + DateTime.Now.ToString("yyyy-MM-dd HH:mm")
+            lines.Add("# exported " + DateTime.Now.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)
                       + (string.IsNullOrEmpty(fromModel) ? "" : " from " + fromModel));
             lines.Add("#");
             lines.Add("# Categories and filter rules only. Nothing here identifies a model,");
@@ -128,7 +128,7 @@ namespace LiveClash.Core
                 if (!File.Exists(path)) { sum.Problem = "That file no longer exists."; return sum; }
 
                 var lines = File.ReadAllLines(path);
-                if (lines.Length == 0 || !lines[0].TrimStart('﻿').StartsWith("# LiveClash filter preset"))
+                if (lines.Length == 0 || !lines[0].TrimStart('﻿').StartsWith("# LiveClash filter preset", StringComparison.Ordinal))
                 {
                     sum.Problem = "That is not a Live Clash filter preset.";
                     return sum;
@@ -176,7 +176,7 @@ namespace LiveClash.Core
                 // been a message nobody could ever see. This one is real and the preset is
                 // still importable; the import dialog says so before replacing anything.
                 foreach (var raw in lines)
-                    if (raw != null && raw.TrimStart().StartsWith("set.begin=")) sum.DeclaredSets++;
+                    if (raw != null && raw.TrimStart().StartsWith("set.begin=", StringComparison.Ordinal)) sum.DeclaredSets++;
 
                 sum.Valid = true;
                 loaded = s;

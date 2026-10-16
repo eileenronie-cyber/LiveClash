@@ -73,6 +73,11 @@ namespace LiveClash
                 application.ControlledApplication.DocumentSavingAs += OnDocumentSavingAs;
 
                 Log.Info("Live Clash started.");
+                // Which build, on which Revit and runtime: the first thing a pilot's log is asked.
+                // A separate line, so tools that match "Live Clash started." exactly keep working.
+                Log.Info("Version " + VersionText() + " on Revit " + application.ControlledApplication.VersionNumber
+                         + " (" + application.ControlledApplication.VersionBuild + "), "
+                         + System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription + ".");
                 return Result.Succeeded;
             }
             catch (Exception ex)
@@ -104,7 +109,24 @@ namespace LiveClash
             {
                 Log.Warn("OnShutdown failed", ex);
             }
+            // Last, so a failed shutdown is counted in it. A pilot is judged on this line.
+            Log.Info(Log.SessionSummary());
             return Result.Succeeded;
+        }
+
+        /// <summary>The add-in's own version (the csproj Version), as the log and the pilot notes name it.</summary>
+        internal static string VersionText()
+        {
+            try
+            {
+                var asm = typeof(LiveClashApp).Assembly;
+                var info = (AssemblyInformationalVersionAttribute)Attribute.GetCustomAttribute(asm, typeof(AssemblyInformationalVersionAttribute));
+                var v = info != null && !string.IsNullOrEmpty(info.InformationalVersion) ? info.InformationalVersion : asm.GetName().Version.ToString();
+                // The SDK appends "+<commit>" when source link is on; the plain number is what people quote.
+                int plus = v.IndexOf('+');
+                return plus > 0 ? v.Substring(0, plus) : v;
+            }
+            catch { return "unknown"; }
         }
 
         // ------------------------------------------------------------------ ribbon
@@ -699,7 +721,7 @@ namespace LiveClash
                 List<ClashResult> hostChanged;
                 var targetOnly = ClashUpdater.SplitRemovedRows(touched, ClashResultStore.Instance.RemoveForElement, out hostChanged);
                 if (targetOnly.Count > 0) ClashUpdater.ReverifyTargetOnly(doc, ClashSettings.Current, targetOnly);
-                if (hostChanged.Count > 0) ClashUpdater.ReverifyHostChanged(doc, ClashSettings.Current, hostChanged);
+                if (hostChanged.Count > 0) ClashUpdater.ReverifyHostChanged(doc, ClashSettings.Current, hostChanged, "undo/redo");
 
                 // Still deferred for a FRESH check: reconciling the OLD rows above only answers
                 // whether what was already listed is still true, never whether the undo/redo

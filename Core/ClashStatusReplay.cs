@@ -127,6 +127,14 @@ namespace LiveClash.Core
             // replayed — see the class note for what applying it inline cost.
             var goneAt = new Dictionary<string, DateTime>(StringComparer.Ordinal);
 
+            // The NEWEST decision line that carried element detail, per key, and whether the line
+            // that won each key carried its own. Element detail used to be carried forward inline,
+            // from whatever entry happened to be in the dictionary when a detail-less line arrived -
+            // so it depended on file order, which is exactly what this class exists to remove. Found
+            // by the shuffled-history fuzz check (FuzzChecks), on its first random history.
+            var latestDetail = new Dictionary<string, ClashStatusEntry>(StringComparer.Ordinal);
+            var winnerHadDetail = new Dictionary<string, bool>(StringComparer.Ordinal);
+
             foreach (var line in lines)
             {
                 if (line == null || line.Length == 0 || line[0] == '#') continue;
@@ -186,9 +194,9 @@ namespace LiveClash.Core
                 string hn = "", hc = "", on = "", oc = "", mn = "";
                 if (p.Length >= 12)
                 {
-                    long.TryParse(p[5], out hid);
+                    _ = long.TryParse(p[5], out hid);   // 0 (no detail) when unreadable
                     hn = p[6]; hc = p[7];
-                    long.TryParse(p[8], out oid);
+                    _ = long.TryParse(p[8], out oid);
                     on = p[9]; oc = p[10]; mn = p[11];
                 }
                 else if (damaged)
@@ -198,7 +206,7 @@ namespace LiveClash.Core
                     hid = recoveredHostId;
                     hn = recoveredHostName ?? "";
                     hc = p[5];
-                    long.TryParse(p[6], out oid);
+                    _ = long.TryParse(p[6], out oid);
                     on = p[7]; oc = p[8]; mn = p[9];
                     repaired++;
                 }
@@ -217,13 +225,36 @@ namespace LiveClash.Core
                     continue;
                 }
 
-                ClashStatusKind kind;
+                // Initialised although every path assigns it: mutation testing rewrites the try below,
+                // and a mutant that cannot compile is a mutant that cannot be tested.
+                ClashStatusKind kind = ClashStatusKind.New;
                 try { kind = (ClashStatusKind)Enum.Parse(typeof(ClashStatusKind), ev); }
                 catch { continue; }
 
                 // Replay in timestamp order, not file order: with two writers appending,
                 // the file is interleaved and only the clock says which decision is
                 // current.
+                // `damaged` matters here too: a repaired ten-field line carries exactly
+                // the same detail as a healthy twelve-field one, so guarding on the raw
+                // field count alone would parse the recovery and then throw it away.
+                bool hasDetail = p.Length >= 12 || damaged;
+
+                // An entry already in the dictionary before this replay began (a merge) is history
+                // too: its detail can be carried just like a line's.
+                if (e != null && e.HasDetail && !winnerHadDetail.ContainsKey(k) && !latestDetail.ContainsKey(k))
+                    latestDetail[k] = e;
+
+                if (hasDetail)
+                {
+                    ClashStatusEntry ld = null;   // initialised so mutants of the condition still compile
+                    if (!latestDetail.TryGetValue(k, out ld) || when > ld.WhenUtc)
+                        latestDetail[k] = new ClashStatusEntry
+                        {
+                            WhenUtc = when, HostId = hid, HostName = hn, HostCategory = hc,
+                            OtherId = oid, OtherName = on, OtherCategory = oc, ModelName = mn
+                        };
+                }
+
                 if (e != null && e.WhenUtc > when) { events++; continue; }
 
                 var ne = new ClashStatusEntry
@@ -234,23 +265,31 @@ namespace LiveClash.Core
                     Note = note,
                     Gone = false
                 };
-                // `damaged` matters here too: a repaired ten-field line carries exactly
-                // the same detail as a healthy twelve-field one, so guarding on the raw
-                // field count alone would parse the recovery and then throw it away.
-                if (p.Length >= 12 || damaged)
+                if (hasDetail)
                 {
                     ne.HostId = hid; ne.HostName = hn; ne.HostCategory = hc;
                     ne.OtherId = oid; ne.OtherName = on; ne.OtherCategory = oc; ne.ModelName = mn;
                 }
-                else if (e != null && e.HasDetail)
-                {
-                    // An older detail-less line supersedes: carry the detail forward.
-                    ne.HostId = e.HostId; ne.HostName = e.HostName; ne.HostCategory = e.HostCategory;
-                    ne.OtherId = e.OtherId; ne.OtherName = e.OtherName; ne.OtherCategory = e.OtherCategory;
-                    ne.ModelName = e.ModelName;
-                }
                 byKey[k] = ne;
+                winnerHadDetail[k] = hasDetail;
                 events++;
+            }
+
+            // A winning line without detail (older format, or a decision made while the pair was not
+            // in the live set) takes the detail of the NEWEST line that had some, so the record still
+            // reads with names. Done after the pass, so it is the newest by clock, not the latest read.
+            // Keys whose winner was already in the dictionary before this replay (a merge) count too, when
+            // that entry has no detail of its own.
+            foreach (var d in latestDetail)
+            {
+                ClashStatusEntry we = null;   // initialised so mutants of the conditions still compile
+                bool had = false;
+                if (!byKey.TryGetValue(d.Key, out we) || ReferenceEquals(we, d.Value)) continue;
+                if (winnerHadDetail.TryGetValue(d.Key, out had) ? had : we.HasDetail) continue;
+                var ld = d.Value;
+                we.HostId = ld.HostId; we.HostName = ld.HostName; we.HostCategory = ld.HostCategory;
+                we.OtherId = ld.OtherId; we.OtherName = ld.OtherName; we.OtherCategory = ld.OtherCategory;
+                we.ModelName = ld.ModelName;
             }
 
             // NOW apply the Gone events, against the decision that actually won.

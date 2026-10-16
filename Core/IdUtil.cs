@@ -10,6 +10,7 @@ namespace LiveClash.Core
     /// runtime helpers can be linked into the headless CI test project without
     /// dragging the whole result/geometry graph along.
     /// </summary>
+    [RevitBound]
     public static class IdUtil
     {
         public static long Value(ElementId id)

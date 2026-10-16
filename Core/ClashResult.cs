@@ -26,12 +26,12 @@ namespace LiveClash.Core
     public class ClashResult
     {
         /// <summary>The element you were modelling (always lives in the host document).</summary>
-        public ElementId HostElementId { get; set; }
+        [RevitBound] public ElementId HostElementId { get; set; }
         public string HostElementName { get; set; }
         public string HostCategory { get; set; }
 
         /// <summary>The thing it hit.</summary>
-        public ElementId OtherElementId { get; set; }
+        [RevitBound] public ElementId OtherElementId { get; set; }
         public string OtherElementName { get; set; }
         public string OtherCategory { get; set; }
 
@@ -39,7 +39,7 @@ namespace LiveClash.Core
         /// Null when the other element is in the host document, otherwise the
         /// RevitLinkInstance id — needed to select/zoom the linked element.
         /// </summary>
-        public ElementId LinkInstanceId { get; set; }
+        [RevitBound] public ElementId LinkInstanceId { get; set; }
 
         /// <summary>"Current model" or the link's display name. Shown in the panel.</summary>
         public string ModelName { get; set; }
@@ -47,7 +47,7 @@ namespace LiveClash.Core
         public ClashSeverity Severity { get; set; }
 
         /// <summary>Approximate centre of the overlap, in host coordinates.</summary>
-        public XYZ Location { get; set; }
+        [RevitBound] public XYZ Location { get; set; }
 
         public DateTime DetectedUtc { get; set; } = DateTime.UtcNow;
 
@@ -90,19 +90,25 @@ namespace LiveClash.Core
         /// Cross-document pairs keep their order: the ids live in different
         /// documents and are not interchangeable.
         /// </summary>
+        // Stryker disable all : [RevitBound] - takes ElementIds; the rule below is tested headless, this wrapper in Revit.
+        [RevitBound]
         public static string MakeKey(ElementId a, ElementId linkInstance, ElementId b)
         {
-            long va = IdUtil.Value(a);
-            long vb = IdUtil.Value(b);
+            return MakeKey(IdUtil.Value(a), linkInstance == null ? (long?)null : IdUtil.Value(linkInstance), IdUtil.Value(b));
+        }
+        // Stryker restore all
 
-            if (linkInstance == null)
+        /// <summary>The rule itself, on raw id values: null <paramref name="link"/> means same document.</summary>
+        internal static string MakeKey(long va, long? link, long vb)
+        {
+            if (link == null)
             {
                 long lo = va < vb ? va : vb;
                 long hi = va < vb ? vb : va;
                 return lo + "|0|" + hi;
             }
 
-            return va + "|" + IdUtil.Value(linkInstance) + "|" + vb;
+            return va + "|" + link.Value + "|" + vb;
         }
 
         public override string ToString()

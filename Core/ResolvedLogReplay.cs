@@ -163,7 +163,7 @@ namespace LiveClash.Core
 
                 if (ev == Retraction)
                 {
-                    DateTime rwhen;
+                    DateTime rwhen = when;   // initialised so mutants of the condition below still compile
                     if (p.Length <= 11 || !DateTime.TryParse(p[11], CultureInfo.InvariantCulture,
                             DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out rwhen))
                         rwhen = when;
@@ -177,8 +177,8 @@ namespace LiveClash.Core
                 }
 
                 long hid, oid;
-                long.TryParse(p[3], out hid);
-                long.TryParse(p[6], out oid);
+                _ = long.TryParse(p[3], out hid);   // 0 when unreadable: the entry still reads by name
+                _ = long.TryParse(p[6], out oid);
 
                 var rec = new ResolvedRecord
                 {

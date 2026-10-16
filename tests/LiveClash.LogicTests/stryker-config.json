@@ -1,0 +1,11 @@
+{
+  "stryker-config": {
+    "project": "LiveClash.Logic.csproj",
+    "test-projects": [ "LiveClash.LogicTests.csproj" ],
+    "configuration": "Release",
+    "coverage-analysis": "off",
+    "mutate": [ "**/*.cs", "!**/ParameterReader.cs", "!**/IdUtil.cs", "!**/RevitBoundAttribute.cs" ],
+    "reporters": [ "html", "json", "progress", "cleartext" ],
+    "thresholds": { "high": 85, "low": 70, "break": 0 }
+  }
+}

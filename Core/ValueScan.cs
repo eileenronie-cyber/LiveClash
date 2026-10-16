@@ -81,7 +81,7 @@ namespace LiveClash.Core
             IEnumerable<BuiltInCategory> categories, IEnumerable<ParamRef> parameters)
         {
             var cats = new List<string>();
-            foreach (var c in categories) cats.Add(((int)c).ToString());
+            foreach (var c in categories) cats.Add(((int)c).ToString(System.Globalization.CultureInfo.InvariantCulture));
             cats.Sort();
 
             var prms = new List<string>();

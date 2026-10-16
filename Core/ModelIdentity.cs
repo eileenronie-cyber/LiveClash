@@ -52,6 +52,8 @@ namespace LiveClash.Core
         /// a file path — both identify the same thing this needs, and the central GUID does it in
         /// one call that already exists in Revit 2024, the oldest version LiveClash targets.
         /// </summary>
+        // Stryker disable all : [RevitBound] - reads a live Document; tested in Revit (SyncGuardChecks).
+        [RevitBound]
         public static string Compute(Document doc)
         {
             if (doc == null) return null;
@@ -63,6 +65,7 @@ namespace LiveClash.Core
             }
             catch { return null; }
         }
+        // Stryker restore all
 
         /// <summary>
         /// Pull the identity recorded among a store's lines, if any. The LAST "# identity=..."

@@ -28,7 +28,7 @@ namespace LiveClash.Core
     public static class ClashChangeTracker
     {
         /// <summary>The clash list as the add-in holds it now. Set once at start-up; while null, nothing is tracked.</summary>
-        public static Func<List<ClashResult>> SnapshotSource;
+        public static Func<List<ClashResult>> SnapshotSource { get; set; }
 
         /// <summary>The list as it stood when the first unreconciled link change landed, and which links have changed since.</summary>
         public sealed class Baseline
@@ -130,7 +130,7 @@ namespace LiveClash.Core
             bool changed = false;
             if (_pending == null)
             {
-                List<ClashResult> now;
+                List<ClashResult> now = null;   // initialised so mutants of the try below still compile
                 try { now = source(); }
                 catch { return; }
                 // Cloned, not the live rows themselves: ClashResultStore.UpdateSeverity mutates a
@@ -223,7 +223,7 @@ namespace LiveClash.Core
 
         internal static string Plural(int n, string noun)
         {
-            return n + " " + (n == 1 ? noun : noun + (noun.EndsWith("sh") || noun.EndsWith("s") ? "es" : "s"));
+            return n + " " + (n == 1 ? noun : noun + (noun.EndsWith("sh", StringComparison.Ordinal) || noun.EndsWith("s", StringComparison.Ordinal) ? "es" : "s"));
         }
 
         // ---------------------------------------------------------------- tests

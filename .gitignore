@@ -18,3 +18,7 @@ audit/
 
 # Office lock files: present while a workbook is open, never source.
 ~$*
+
+# Packaged output and mutation-testing reports (ci\mutation.ps1): build output.
+dist/
+StrykerOutput/

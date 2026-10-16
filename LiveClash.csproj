@@ -29,6 +29,11 @@
     <Configurations>Debug;Release</Configurations>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <!-- The add-in's version, written to the log at start-up so a log line can be matched to
+         the exact build. A GitHub release build overrides it with the tag's version
+         (-p:Version, see .github/workflows/release.yml). -->
+    <Version>0.9.0</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
 
     <!-- One folder per Revit version, for both the output and the intermediates.
          The .addin manifests point straight at bin\Debug<version>, so building IS
@@ -40,6 +45,10 @@
     <OutputPath>bin\$(Configuration)$(RevitVersion)\</OutputPath>
     <IntermediateOutputPath>obj\$(Configuration)$(RevitVersion)\</IntermediateOutputPath>
     <EnableDefaultNoneItems>false</EnableDefaultNoneItems>
+    <!-- Not even ENUMERATED by the default globs (the Compile Removes below only drop them afterwards).
+         The WPF build's **/*.xaml glob walked tests\ while a mutation run was creating and deleting
+         build folders there, and failed with "File '**/*.xaml' cannot be found" (BG1002). -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);tests\**;docs\**;dist\**;StrykerOutput\**</DefaultItemExcludes>
   </PropertyGroup>
 
   <!-- Version constants so one source tree compiles against several Revit APIs -->

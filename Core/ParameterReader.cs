@@ -25,6 +25,7 @@ namespace LiveClash.Core
     /// "Supply Air". Text parameters need AsString(), because AsValueString()
     /// returns null for them.
     /// </summary>
+    [RevitBound]
     public static class ParameterReader
     {
         public static string Read(Element e, string parameterName, ParamScope scope)
@@ -95,13 +96,16 @@ namespace LiveClash.Core
 
                 switch (p.StorageType)
                 {
-                    case StorageType.Integer: return p.AsInteger().ToString();
-                    case StorageType.Double: return p.AsDouble().ToString();
+                    // Invariant: this text is what a picked value is saved as and compared against, and
+                    // filters travel between seats (.lcfilter presets). A comma-decimal Windows locale
+                    // would otherwise write "1,5" where a colleague's seat reads "1.5".
+                    case StorageType.Integer: return p.AsInteger().ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    case StorageType.Double: return p.AsDouble().ToString(System.Globalization.CultureInfo.InvariantCulture);
                     case StorageType.ElementId:
                         var id = p.AsElementId();
                         if (id == null || id == ElementId.InvalidElementId) return "";
                         var t = owner != null ? owner.Document.GetElement(id) : null;
-                        return t != null ? t.Name : IdUtil.Value(id).ToString();
+                        return t != null ? t.Name : IdUtil.Value(id).ToString(System.Globalization.CultureInfo.InvariantCulture);
                 }
             }
             catch { }

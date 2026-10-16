@@ -22,6 +22,8 @@ namespace LiveClash.Core
     /// This updater only reads. It does not modify the model at all, which also
     /// means it never dirties the document or triggers a second update cycle.
     /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1001",
+        Justification = "One instance per Revit process, registered with Revit for its whole life; Revit owns the UpdaterId's lifetime.")]
     public class ClashUpdater : IUpdater
     {
         // Must stay constant across sessions — Revit persists updater ids in the model.
@@ -123,7 +125,7 @@ namespace LiveClash.Core
                     // the same way ReverifyTargetOnly already runs unconditionally regardless of
                     // edit size. Found reviewing the whole codebase, 2026-09-27, immediately
                     // after fixing the same-shaped gap for the ordinary (non-deferred) edit size.
-                    if (hostChanged.Count > 0) ReverifyHostChanged(doc, settings, hostChanged);
+                    if (hostChanged.Count > 0) ReverifyHostChanged(doc, settings, hostChanged, "bulk edit");
                     DeferredQueue.Enqueue(doc, changed);
                     return;
                 }
@@ -271,7 +273,11 @@ namespace LiveClash.Core
         /// immediately after fires its own DocumentChanged with this same element in it, and
         /// the ordinary live re-check restores the clash correctly if it comes back.
         /// </summary>
-        internal static void ReverifyHostChanged(Document doc, ClashSettings settings, List<ClashResult> rows)
+        /// <param name="doc">The document the rows belong to.</param>
+        /// <param name="settings">The live settings the rows were found under.</param>
+        /// <param name="rows">Rows whose HOST element changed and which the re-check did not find again.</param>
+        /// <param name="source">What removed them, for the log line ("live edit", "bulk edit", "undo/redo").</param>
+        internal static void ReverifyHostChanged(Document doc, ClashSettings settings, List<ClashResult> rows, string source = "live edit")
         {
             Dictionary<long, LinkContext> links = null;
             foreach (var r in rows)
@@ -309,6 +315,13 @@ namespace LiveClash.Core
                 ClashStatusStore.Instance.NoteGone(confirmedGone);
                 ResolvedLog.Add(fixedOnes);
             }
+
+            // Every other path that records a fix logs it; this one did not, so only the ledger file
+            // could prove it had run (Roadmap R03). One line per call, only when there was something to say.
+            if (rows.Count > 0)
+                Log.Info("Re-verified " + rows.Count + " clash(es) after a " + (source ?? "change") + ": "
+                         + fixedOnes.Count + " confirmed resolved and recorded, " + restore.Count
+                         + " kept (still clashing or not verifiable now).");
         }
 
         // -------------------------------------------------- deletions, recorded late

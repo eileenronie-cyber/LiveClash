@@ -15,6 +15,10 @@ namespace LiveClash.Core
     /// </summary>
     public static class ShortHash
     {
+        // CA5350 (weak algorithm) is a deliberate non-issue here: this is a label, not a security
+        // boundary, and changing the algorithm would change every tag already written to disk.
+        [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "CA5350",
+            Justification = "A short display/collision tag, not a security control; existing tags on disk depend on SHA-1.")]
         public static string Of(string s)
         {
             if (string.IsNullOrEmpty(s)) return "";
@@ -22,7 +26,7 @@ namespace LiveClash.Core
             {
                 var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(s));
                 var sb = new StringBuilder(8);
-                for (int i = 0; i < 4; i++) sb.Append(bytes[i].ToString("x2"));
+                for (int i = 0; i < 4; i++) sb.Append(bytes[i].ToString("x2", System.Globalization.CultureInfo.InvariantCulture));
                 return sb.ToString();
             }
         }

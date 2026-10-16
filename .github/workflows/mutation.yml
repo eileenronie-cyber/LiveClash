@@ -1,0 +1,39 @@
+# Mutation testing of the Revit-free logic (ci/mutation.ps1, Stryker.NET).
+#
+# Not on every push: it takes tens of minutes. Weekly, and on demand from the Actions tab. The HTML
+# report is uploaded as an artifact so a surviving mutant can be read without re-running it.
+
+name: Mutation
+
+on:
+  schedule:
+    - cron: '0 3 * * 1'   # Mondays 03:00 UTC
+  workflow_dispatch:
+
+jobs:
+  mutation:
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET SDKs
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Run mutation testing
+        shell: pwsh
+        run: ./ci/mutation.ps1 -Out "${{ runner.temp }}/LiveClash-mutation"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-report
+          path: ${{ runner.temp }}/LiveClash-mutation/**/reports/
+          if-no-files-found: ignore

@@ -247,7 +247,7 @@ namespace LiveClash.UI
                 if (h == IntPtr.Zero) return;
                 int on = dark ? 1 : 0;
                 if (DwmSetWindowAttribute(h, 20, ref on, sizeof(int)) != 0)
-                    DwmSetWindowAttribute(h, 19, ref on, sizeof(int));
+                    _ = DwmSetWindowAttribute(h, 19, ref on, sizeof(int));   // older Windows 10 id; cosmetic if it fails too
             }
             catch { }
         }

@@ -191,6 +191,8 @@ Two tiers, split by what can run where:
 dotnet run --project tests\LiveClash.LogicTests    # exit code = failed-check count
 ```
 
+The code under test is `tests\LiveClash.Logic` (the Revit-free Core files compiled as their own assembly, so coverage and mutation tools can measure product code separately from the checks); `dotnet test` runs the same list as one MSTest test, which is how Stryker.NET drives it.
+
 The whole gate (compile every runtime from NuGet reference assemblies, then the logic tests) is one script, runnable locally before a push and identical to what CI runs:
 
 ```powershell
@@ -204,6 +206,17 @@ It builds `net48 / net8 / net10` (Revit 2024 / 2025 / 2026) against the Nice3poi
 *Why not just run everything in CI?* You can't `dotnet test` a clash engine — its core operation is a Revit API call. The split is the honest shape: compile + pure logic gated automatically, geometry proven in Revit.
 
 `Testing/` is never compiled into the add-in; only `tests/LiveClash.LogicTests` links it.
+
+**Two of those have since moved into the headless tier too.** The *rules* inside `MakeKey` and `ParameterFilter.Matches` now live in Revit-free methods (`MakeKey(long, long?, long)`, and a matcher that reads values through `ParameterFilter.IValueSource`); the public Revit-typed methods are thin wrappers marked `[RevitBound]`. The in-Revit checks still run them end to end on real elements.
+
+### Quality gates beyond the tests
+
+| What | Command | Gate |
+|---|---|---|
+| Coverage of the Revit-free logic | `.\ci\coverage.ps1` | line and branch coverage above a ratchet (part of `ci\gate.ps1`); `[RevitBound]` members excluded and kept thin |
+| Static analysis | `.\ci\analyze.ps1` | .NET analyzers: zero findings in reliability/security, nothing new beyond `ci\analyzers-baseline.txt` (part of `ci\gate.ps1`) |
+| Mutation testing | `.\ci\mutation.ps1` | Stryker.NET plants defects in the Revit-free logic; weekly in CI (`.github\workflows\mutation.yml`) |
+| Fuzz / property checks | inside the logic tests | seeded random filters, ledger histories (shuffled), CSV fields and search queries (`Testing\FuzzChecks.cs`) |
 
 ---
 

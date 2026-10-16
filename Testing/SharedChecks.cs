@@ -18,6 +18,7 @@ namespace LiveClash.Testing
         public static void RunAll(Action<string, bool?> check)
         {
             FilterLogicChecks.RunAll(check);
+            FilterMatchChecks.RunAll(check);
             StatusReplayChecks.RunAll(check);
             ResolvedReplayChecks.RunAll(check);
             LinkWatchChecks.RunAll(check);
@@ -25,6 +26,10 @@ namespace LiveClash.Testing
             ClashChangeChecks.RunAll(check);
             ModelIdentityChecks.RunAll(check);
             CsvStampChecks.RunAll(check);
+            ResultFormatChecks.RunAll(check);
+            LogChecks.RunAll(check);
+            FuzzChecks.RunAll(check);
+            EdgeCaseChecks.RunAll(check);
         }
     }
 }

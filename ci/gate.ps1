@@ -24,6 +24,16 @@
                          (tests\LiveClash.LogicTests) actually EXECUTE and must
                          all pass. Exit code is the failure count.
 
+      2b. Coverage     - ci\coverage.ps1: line and branch coverage of the Revit-free
+                         logic (tests\LiveClash.Logic) must stay above its ratchet.
+
+      2c. Static analysis - ci\analyze.ps1: the .NET analyzers find nothing in the
+                         reliability/security categories and nothing new beyond
+                         ci\analyzers-baseline.txt.
+
+      Mutation testing (ci\mutation.ps1) is NOT a gate leg: it takes many minutes, so it
+      runs on demand and weekly in CI (.github\workflows\mutation.yml).
+
     What a build machine CANNOT check: geometry verification, ClashResult.MakeKey
     and the TargetIndex grid. Solid, BooleanOperationsUtils, ElementId and Document
     only exist inside Revit's process.
@@ -164,12 +174,30 @@ if ($logic -ne 0) {
     $fail += $logic
 }
 
+# 2b. Coverage of the Revit-free logic, with a ratchet threshold (ci\coverage.ps1), and
+# 2c. static analysis against its baseline (ci\analyze.ps1). Both headless; both skipped by -Quick
+# to keep the pre-push hook to seconds - CI runs them on every push.
+if (-not $Quick) {
+    Write-Host ""
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'ci\coverage.ps1') -NoBuild
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "COVERAGE GATE FAILED" -ForegroundColor Red
+        $fail++
+    }
+    Write-Host ""
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'ci\analyze.ps1')
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "STATIC ANALYSIS GATE FAILED" -ForegroundColor Red
+        $fail++
+    }
+}
+
 Write-Host ""
 if ($fail -eq 0) {
     if ($Quick) {
         $what = "QUICK: 1 Debug compile + logic tests - the full gate and CI run the rest"
     } else {
-        $what = "compile x$($Versions.Count) Release + 1 Debug + doc comments + logic tests"
+        $what = "compile x$($Versions.Count) Release + 1 Debug + doc comments + logic tests + coverage + static analysis"
     }
     Write-Host "GATE PASSED ($what)" -ForegroundColor Green
     exit 0

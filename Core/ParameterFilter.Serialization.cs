@@ -177,7 +177,7 @@ namespace LiveClash.Core
                 else if (key == "group" && p.Length >= 2)
                 {
                     // group=<index>|<Join>
-                    int gi = int.Parse(p[0]);
+                    int gi = int.Parse(p[0], System.Globalization.CultureInfo.InvariantCulture);
                     if (gi < 0 || gi > MaxIndex) return;   // see MaxIndex
                     while (Groups.Count <= gi) Groups.Add(new RuleGroup());
                     Groups[gi].Join = (RuleJoin)Enum.Parse(typeof(RuleJoin), p[1]);
@@ -191,7 +191,7 @@ namespace LiveClash.Core
                     // is always first, and what follows is either a rule index (integer)
                     // or a scope (name). Same bug, same fix — two rules in one group
                     // sharing a scope, operator and parameter used to merge into one.
-                    int gi = int.Parse(p[0]);
+                    int gi = int.Parse(p[0], System.Globalization.CultureInfo.InvariantCulture);
                     if (gi < 0 || gi > MaxIndex) return;   // see MaxIndex
 
                     int at;

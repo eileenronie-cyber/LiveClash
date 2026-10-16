@@ -39,7 +39,7 @@ jobs:
           $tag = "${{ github.ref_name }}"
           New-Item -ItemType Directory release -Force | Out-Null
           foreach ($v in 2024, 2025, 2026) {
-            dotnet build LiveClash.csproj -c Release -p:RevitVersion=$v -p:RevitApiSource=NuGet -v m --nologo
+            dotnet build LiveClash.csproj -c Release -p:RevitVersion=$v -p:RevitApiSource=NuGet -p:Version=$($tag.TrimStart('v')) -v m --nologo
             if ($LASTEXITCODE -ne 0) { throw "build failed for $v" }
             $stage = "stage/LiveClash-Revit$v"
             New-Item -ItemType Directory $stage -Force | Out-Null

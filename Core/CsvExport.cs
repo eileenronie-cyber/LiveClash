@@ -71,9 +71,9 @@ namespace LiveClash.Core
                 sb.Append(Q(r.WhenText)).Append(',');
                 sb.Append(r.StillClashing ? "yes" : "").Append(',');
                 sb.Append(Q(r.HostText)).Append(',');
-                sb.Append(r.HostId != 0 ? r.HostId.ToString() : "").Append(',');
+                sb.Append(r.HostId != 0 ? r.HostId.ToString(CultureInfo.InvariantCulture) : "").Append(',');
                 sb.Append(Q(r.OtherText)).Append(',');
-                sb.Append(r.OtherId != 0 ? r.OtherId.ToString() : "").Append(',');
+                sb.Append(r.OtherId != 0 ? r.OtherId.ToString(CultureInfo.InvariantCulture) : "").Append(',');
                 sb.Append(Q(r.ModelName)).Append(',');
                 sb.Append(Q(r.By)).Append(',');
                 sb.Append(Q(r.Note));

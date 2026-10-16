@@ -297,7 +297,7 @@ namespace LiveClash.Core
         public static string DisplayName(BuiltInCategory bic)
         {
             var s = bic.ToString();
-            if (s.StartsWith("OST_")) s = s.Substring(4);
+            if (s.StartsWith("OST_", StringComparison.Ordinal)) s = s.Substring(4);
 
             // Split PascalCase into words: "CableTrayFitting" -> "Cable Tray Fitting".
             var sb = new System.Text.StringBuilder();

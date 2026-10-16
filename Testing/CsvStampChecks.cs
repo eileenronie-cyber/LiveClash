@@ -32,11 +32,11 @@ namespace LiveClash.Testing
             check("csv stamp: the header adds exactly four named columns, in order (" + header + ")",
                 header == ",Exported from,Exported,Exported by,Rules");
 
-            var stamp = new CsvStamp { Model = "MEP-Tower A", Exported = new DateTime(2026, 9, 23, 14, 5, 0), By = "jtorres", Rules = "a1b2c3d4" };
+            var stamp = new CsvStamp { Model = "MEP-Tower A", Exported = new DateTime(2026, 9, 23, 14, 5, 0), By = "jdoe", Rules = "a1b2c3d4" };
             var cells = SplitRow("x" + stamp.RowCells());
             check("csv stamp: a row gets one cell per added column (" + (cells.Count - 1) + ")", cells.Count == 1 + CsvStamp.Columns.Length);
             check("csv stamp: ...holding the model, the time, the user and the rules, in that order",
-                cells.Count == 5 && cells[1] == "MEP-Tower A" && cells[2] == "2026-09-23 14:05" && cells[3] == "jtorres" && cells[4] == "a1b2c3d4");
+                cells.Count == 5 && cells[1] == "MEP-Tower A" && cells[2] == "2026-09-23 14:05" && cells[3] == "jdoe" && cells[4] == "a1b2c3d4");
 
             var awkward = new CsvStamp { Model = "Tower A, \"Level 3\"", Exported = new DateTime(2026, 1, 2, 3, 4, 0), By = "=cmd", Rules = "" };
             var ac = SplitRow("x" + awkward.RowCells());

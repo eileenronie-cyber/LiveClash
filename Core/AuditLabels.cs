@@ -262,7 +262,7 @@ namespace LiveClash.Core
                     if (k == "label" && p.Length >= 2)
                     {
                         bool drop;
-                        bool.TryParse(p[1], out drop);
+                        _ = bool.TryParse(p[1], out drop);   // unreadable means not dropped
                         lock (_gate)
                         {
                             bool found = false;

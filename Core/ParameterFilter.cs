@@ -276,10 +276,45 @@ namespace LiveClash.Core
             return s == null ? "" : s.Trim().ToLowerInvariant();
         }
 
+        /// <summary>
+        /// Where the matcher reads an element's values from. The add-in reads a Revit
+        /// <see cref="Element"/> (<see cref="ElementSource"/>); the headless checks hand in
+        /// plain values, so every rule below runs and is tested with no Revit at all.
+        /// </summary>
+        internal interface IValueSource
+        {
+            /// <summary>The parameter's value as text, or null when it has none.</summary>
+            string Read(string name, ParamScope scope);
+
+            /// <summary>Is this element's exact family+type in <paramref name="drops"/>?</summary>
+            bool TypeExcluded(List<TypeKey> drops);
+        }
+
+        // Stryker disable all : [RevitBound] - needs a live Element, so no headless check can run it; tested in Revit.
+        /// <summary>The add-in's source: a live element. A struct, so the hot path allocates nothing for it.</summary>
+        [RevitBound]
+        private struct ElementSource : IValueSource
+        {
+            private readonly Element _e;
+            public ElementSource(Element e) { _e = e; }
+            public string Read(string name, ParamScope scope) { return ParameterReader.Read(_e, name, scope); }
+            public bool TypeExcluded(List<TypeKey> drops) { return ParameterFilter.TypeExcluded(_e, drops); }
+        }
+
+        [RevitBound]
         public bool Matches(Element e)
         {
             if (e == null) return true;
+            return Matches(new ElementSource(e));
+        }
+        // Stryker restore all
 
+        /// <summary>
+        /// The whole matching decision, Revit-free. Generic over the source so the add-in's struct is
+        /// not boxed: this runs for every source element and every narrow-phase candidate.
+        /// </summary>
+        internal bool Matches<TSource>(TSource e) where TSource : IValueSource
+        {
             var keywords = CachedKeywords();
             var excludeWords = CachedExcludeKeywords();
             bool hasInclude = keywords.Count > 0 || Picked.Count > 0;
@@ -353,14 +388,14 @@ namespace LiveClash.Core
         /// hit costs a dictionary lookup. Never returns null, so callers do not have to
         /// distinguish "absent" from "empty" -- they never did.
         /// </summary>
-        private static string ReadCached(Element e, Dictionary<string, string> cache,
-                                         string name, ParamScope scope)
+        private static string ReadCached<TSource>(TSource e, Dictionary<string, string> cache,
+                                                  string name, ParamScope scope) where TSource : IValueSource
         {
             var key = scope + "::" + (name ?? "").ToLowerInvariant();
             string v;
             if (cache.TryGetValue(key, out v)) return v;
 
-            v = ParameterReader.Read(e, name, scope) ?? "";
+            v = e.Read(name, scope) ?? "";
             cache[key] = v;
             return v;
         }
@@ -371,7 +406,7 @@ namespace LiveClash.Core
         /// operators) is treated as incomplete and passes, so a half-built rule in the
         /// UI never silently excludes everything.
         /// </summary>
-        private bool RuleHolds(Element e, Rule r, Dictionary<string, string> read)
+        private bool RuleHolds<TSource>(TSource e, Rule r, Dictionary<string, string> read) where TSource : IValueSource
         {
             if (r == null) return true;
             var raw = ReadCached(e, read, r.ParameterName, r.Scope);
@@ -415,7 +450,7 @@ namespace LiveClash.Core
         /// holds; an AND group when they all do. An empty group holds -- there is nothing
         /// in it to fail, so it never narrows anything (matching the flat-rules guard).
         /// </summary>
-        private bool GroupHolds(Element e, RuleGroup g, Dictionary<string, string> read)
+        private bool GroupHolds<TSource>(TSource e, RuleGroup g, Dictionary<string, string> read) where TSource : IValueSource
         {
             if (g == null || g.Rules.Count == 0) return true;
             if (g.Join == RuleJoin.Or)
@@ -433,7 +468,7 @@ namespace LiveClash.Core
         /// parameters AND. An element lacking a value for a constrained parameter
         /// fails it -- that is what makes "only workset X" exclude the unworkseted.
         /// </summary>
-        private bool OnlyMatches(Element e, Dictionary<string, string> read)
+        private bool OnlyMatches<TSource>(TSource e, Dictionary<string, string> read) where TSource : IValueSource
         {
             // Group by (scope, parameter). A parameter is constrained only if at least
             // one of its entries has a non-empty value.
@@ -474,8 +509,8 @@ namespace LiveClash.Core
             return true;
         }
 
-        private bool Hits(Element e, List<string> keywords, List<ValuePick> picks,
-                          Dictionary<string, string> read)
+        private bool Hits<TSource>(TSource e, List<string> keywords, List<ValuePick> picks,
+                                   Dictionary<string, string> read) where TSource : IValueSource
         {
             // Keywords search only the nominated parameters.
             if (keywords.Count > 0)
@@ -513,9 +548,9 @@ namespace LiveClash.Core
         /// Does this element's exact family+type appear in this filter's own
         /// <see cref="ExcludedTypes"/>?
         /// </summary>
-        private bool HitsType(Element e)
+        private bool HitsType<TSource>(TSource e) where TSource : IValueSource
         {
-            return ExcludedTypes.Count > 0 && TypeExcluded(e, ExcludedTypes);
+            return ExcludedTypes.Count > 0 && e.TypeExcluded(ExcludedTypes);
         }
 
         /// <summary>
@@ -531,6 +566,8 @@ namespace LiveClash.Core
         /// the Audit window is dropped across the whole matrix rather than only in the
         /// set that happened to be active -- with no per-set copy to keep in sync.
         /// </summary>
+        // Stryker disable all : [RevitBound] - reads a live Element's type; tested in Revit.
+        [RevitBound]
         public static bool TypeExcluded(Element e, List<TypeKey> drops)
         {
             if (e == null || drops == null || drops.Count == 0) return false;
@@ -544,6 +581,15 @@ namespace LiveClash.Core
                 typeName = t.Name;
             }
             catch { return false; }
+
+            return TypeNamesExcluded(famName, typeName, drops);
+        }
+        // Stryker restore all
+
+        /// <summary>The Revit-free half of <see cref="TypeExcluded"/>: the comparison, on names already read.</summary>
+        internal static bool TypeNamesExcluded(string famName, string typeName, List<TypeKey> drops)
+        {
+            if (drops == null || drops.Count == 0) return false;
 
             var f = Norm(famName);
             var y = Norm(typeName);
