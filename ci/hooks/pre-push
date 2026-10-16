@@ -1,0 +1,14 @@
+#!/bin/sh
+# Pre-push: the FAST headless gate (ci/gate.ps1 -Quick) - one Debug compile plus the
+# headless logic tests. Seconds, not the minutes the full gate takes; a hook that slow
+# gets bypassed with --no-verify within a week, which is worse than a fast partial one.
+#
+# It deliberately does NOT run the three Release builds or the doc-comment leg; CI
+# runs those on every push.
+#
+# Enable once per clone (git cannot ship this setting itself):
+#     git config core.hooksPath ci/hooks
+# Skip for one push in an emergency:   git push --no-verify
+
+root="$(git rev-parse --show-toplevel)" || exit 1
+exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$root/ci/gate.ps1" -Quick

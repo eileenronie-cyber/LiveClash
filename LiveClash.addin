@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RevitAddIns>
+  <AddIn Type="Application">
+    <Name>Live Clash</Name>
+    <Assembly>LiveClash.dll</Assembly>
+    <FullClassName>LiveClash.LiveClashApp</FullClassName>
+    <ClientId>3f2a7c14-5b8e-4d61-9a2f-6c0d84e7b311</ClientId>
+    <VendorId>LCLS</VendorId>
+    <VendorDescription>Live Clash</VendorDescription>
+  </AddIn>
+</RevitAddIns>

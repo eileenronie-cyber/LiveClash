@@ -1,0 +1,383 @@
+<Window x:Class="LiveClash.UI.FilterWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Live Clash — Filter"
+        Width="960" Height="880"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False" ResizeMode="CanResize"
+        FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="12" UseLayoutRounding="True"
+        Foreground="{DynamicResource Text}" Background="{DynamicResource Bg}">
+
+  <Window.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.MergedDictionaries>
+        <ResourceDictionary Source="/LiveClash;component/UI/Theme.xaml"/>
+      </ResourceDictionary.MergedDictionaries>
+
+      <!-- one rule row: parameter, operator, values, browse, remove -->
+      <DataTemplate x:Key="RuleRow">
+        <Grid Margin="0,2">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="128"/><ColumnDefinition Width="4"/>
+            <ColumnDefinition Width="112"/><ColumnDefinition Width="4"/>
+            <ColumnDefinition Width="*"/><ColumnDefinition Width="4"/>
+            <ColumnDefinition Width="Auto"/><ColumnDefinition Width="28"/>
+          </Grid.ColumnDefinitions>
+          <ComboBox Grid.Column="0" Height="27" VerticalContentAlignment="Center"
+                    ItemsSource="{Binding ParamNames, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
+                    SelectedItem="{Binding ParameterName, Mode=TwoWay}"
+                    SelectionChanged="RuleParam_Changed"/>
+          <ComboBox Grid.Column="2" Height="27" VerticalContentAlignment="Center"
+                    ItemsSource="{Binding OperatorOptions, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
+                    SelectedItem="{Binding OperatorLabel, Mode=TwoWay}"/>
+          <TextBlock Grid.Column="4" Text="{Binding ValuesText}" VerticalAlignment="Center"
+                     TextTrimming="CharacterEllipsis" Foreground="{DynamicResource TextSec}" ToolTip="{Binding ValuesText}"/>
+          <Button Grid.Column="6" Style="{StaticResource LcButton}" Content="Browse…" Height="27" Padding="9,0"
+                  Click="BrowseRule_Click" Visibility="{Binding BrowseVis}"
+                  ToolTip="Pick from the values present in the ticked categories"/>
+          <Button Grid.Column="7" Style="{StaticResource LcButton}" Content="&#10005;" Width="27" Height="27" Padding="0"
+                  Click="RemoveRule_Click" ToolTip="Remove this rule"/>
+        </Grid>
+      </DataTemplate>
+
+      <!-- one clash-set chip in the selector strip: name + enabled dot, active = tinted -->
+      <DataTemplate x:Key="SetChip">
+        <Button Click="SetChip_Click" Background="Transparent" BorderThickness="0" Padding="0"
+                Cursor="Hand" ToolTip="Edit this clash set">
+          <Button.Template>
+            <ControlTemplate TargetType="Button">
+              <Border x:Name="chip" CornerRadius="6" Padding="11,5" Margin="0,0,6,0"
+                      Background="{DynamicResource Card}" BorderBrush="{DynamicResource Hairline}" BorderThickness="1">
+                <StackPanel Orientation="Horizontal">
+                  <Ellipse x:Name="dot" Width="7" Height="7" VerticalAlignment="Center" Margin="0,0,7,0"
+                           Fill="{DynamicResource Accent}"/>
+                  <TextBlock x:Name="nm" Text="{Binding Name}" VerticalAlignment="Center" FontSize="12"
+                             Foreground="{DynamicResource Text}"/>
+                </StackPanel>
+              </Border>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                  <Setter TargetName="chip" Property="Background" Value="{DynamicResource BtnHover}"/>
+                </Trigger>
+                <DataTrigger Binding="{Binding IsActive}" Value="True">
+                  <Setter TargetName="chip" Property="Background" Value="{DynamicResource AccentSoft}"/>
+                  <Setter TargetName="chip" Property="BorderBrush" Value="{DynamicResource Accent}"/>
+                  <Setter TargetName="nm" Property="FontWeight" Value="SemiBold"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Enabled}" Value="False">
+                  <Setter TargetName="dot" Property="Fill" Value="{DynamicResource TextMut}"/>
+                  <Setter TargetName="nm" Property="Foreground" Value="{DynamicResource TextMut}"/>
+                </DataTrigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Button.Template>
+        </Button>
+      </DataTemplate>
+
+      <!-- one OR/AND group: a tinted card with an any/all toggle and its own rules -->
+      <DataTemplate x:Key="GroupBox">
+        <Border Background="{DynamicResource GroupBg}" BorderBrush="{DynamicResource GroupBorder}"
+                BorderThickness="1" CornerRadius="6" Margin="0,3" Padding="8">
+          <StackPanel>
+            <DockPanel Margin="0,0,0,5">
+              <TextBlock DockPanel.Dock="Left" Text="Match" VerticalAlignment="Center"
+                         FontSize="11" Foreground="{DynamicResource GroupText}"/>
+              <ComboBox DockPanel.Dock="Left" Width="66" Height="24" Margin="5,0,0,0" VerticalContentAlignment="Center"
+                        ItemsSource="{Binding JoinOptions, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
+                        SelectedItem="{Binding JoinLabel, Mode=TwoWay}"/>
+              <TextBlock DockPanel.Dock="Left" Text="of these rules" VerticalAlignment="Center"
+                         Margin="6,0,0,0" FontSize="11" Foreground="{DynamicResource GroupText}"/>
+              <Button DockPanel.Dock="Right" Style="{StaticResource LcButton}" Content="&#10005;" Width="24" Height="24"
+                      Padding="0" Click="RemoveGroup_Click" ToolTip="Remove this group"/>
+            </DockPanel>
+            <ItemsControl ItemsSource="{Binding Rules}" ItemTemplate="{StaticResource RuleRow}"/>
+            <Button HorizontalAlignment="Left" Style="{StaticResource LcButton}" Content="+ add rule to group"
+                    Height="25" Padding="8,0" Margin="0,4,0,0" FontSize="11" Click="AddGroupRule_Click"/>
+          </StackPanel>
+        </Border>
+      </DataTemplate>
+    </ResourceDictionary>
+  </Window.Resources>
+
+  <DockPanel LastChildFill="True" Margin="14">
+
+    <!-- ================= CLASH-SET SELECTOR ================= -->
+    <Border DockPanel.Dock="Top" Background="{DynamicResource Card}" BorderBrush="{DynamicResource Hairline}"
+            BorderThickness="1" CornerRadius="7" Padding="10,7" Margin="0,0,0,10">
+      <!-- TWO ROWS. This used to be one DockPanel row holding the label, a chip for EVERY
+           set, and six right-docked controls. With one set it just fit; with four (the limit)
+           the per-set Clearance / Insulation / Include controls were pushed out of the window
+           altogether and "+ New set" was squeezed to "+ N". Row 1 is the sets and the buttons
+           that manage them; row 2 is what belongs to the SELECTED set. The right-docked buttons
+           are declared BEFORE the chips so they claim their space first, and the chips wrap. -->
+      <Grid>
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <DockPanel Grid.Row="0" LastChildFill="True">
+          <Button x:Name="DeleteSetBtn" DockPanel.Dock="Right" Style="{StaticResource LcButton}" Content="Delete"
+                  Padding="11,0" Margin="6,0,0,0" VerticalAlignment="Top" Click="DeleteSet_Click" ToolTip="Delete the selected set"/>
+          <Button x:Name="RenameSetBtn" DockPanel.Dock="Right" Style="{StaticResource LcButton}" Content="Rename"
+                  Padding="11,0" Margin="6,0,0,0" VerticalAlignment="Top" Click="RenameSet_Click" ToolTip="Rename the selected set"/>
+          <Button x:Name="NewSetBtn" DockPanel.Dock="Right" Style="{StaticResource LcButton}" Content="+ New set"
+                  Padding="11,0" Margin="14,0,0,0" VerticalAlignment="Top" Click="NewSet_Click" ToolTip="Add another clash set (up to 4)"/>
+          <TextBlock DockPanel.Dock="Left" Text="CLASH SETS" FontSize="10.5" FontWeight="SemiBold"
+                     Foreground="{DynamicResource TextMut}" VerticalAlignment="Top" Margin="0,8,12,0"/>
+          <ItemsControl x:Name="SetStrip" VerticalAlignment="Center"
+                        ItemTemplate="{StaticResource SetChip}">
+            <ItemsControl.ItemsPanel>
+              <ItemsPanelTemplate><WrapPanel Orientation="Horizontal"/></ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+          </ItemsControl>
+        </DockPanel>
+
+        <WrapPanel Grid.Row="1" Orientation="Horizontal" Margin="0,8,0,0">
+          <ComboBox x:Name="SetClearanceCombo" Width="168"
+                    VerticalAlignment="Center" Margin="0,0,14,0" FontSize="11"
+                    SelectionChanged="SetClearance_Changed"
+                    ToolTip="This set's own soft-clash clearance. Inherit follows the ribbon's Clearance setting.">
+            <ComboBoxItem Content="Clearance: Inherit"/>
+            <ComboBoxItem Content="Clearance: Off"/>
+            <ComboBoxItem Content="Clearance: 25 mm (1&quot;)"/>
+            <ComboBoxItem Content="Clearance: 50 mm (2&quot;)"/>
+            <ComboBoxItem Content="Clearance: 100 mm (4&quot;)"/>
+          </ComboBox>
+          <CheckBox x:Name="SetInsulationCheck" Content="Include insulation"
+                    VerticalAlignment="Center" Margin="0,0,14,0" FontSize="11"
+                    Checked="SetInsulation_Changed" Unchecked="SetInsulation_Changed"
+                    ToolTip="Also test by insulation, on the pipe's behalf: a source pipe/duct by its own insulation, and any source by the insulation of pipes/ducts it meets that are only targets - in this model or in a link. Duct lining is never tested."/>
+          <CheckBox x:Name="SetEnabledCheck" Content="Include in checks"
+                    VerticalAlignment="Center" Margin="0,0,0,0" FontSize="11"
+                    Checked="SetEnabled_Changed" Unchecked="SetEnabled_Changed"
+                    ToolTip="When off, this set is kept but skipped by the checker"/>
+        </WrapPanel>
+      </Grid>
+    </Border>
+
+    <TextBlock DockPanel.Dock="Top" TextWrapping="Wrap" Margin="0,0,0,12" Foreground="{DynamicResource TextSec}" LineHeight="18">
+      <Bold>What I model</Bold> fires a check when you draw or move it.
+      <Bold>What I must not hit</Bold> is what those elements are checked against — a clash is only
+      reported when it appears on both sides of the pair.
+    </TextBlock>
+
+    <!-- footer -->
+    <Border DockPanel.Dock="Bottom" BorderBrush="{DynamicResource Hairline}" BorderThickness="0,1,0,0"
+            Padding="0,12,0,0" Margin="0,12,0,0">
+      <!-- A Grid, not a DockPanel: the summary is long (all categories ticked is the DEFAULT
+           state) and a DockPanel docks left-side items first, so it used every pixel and
+           slid Cancel underneath OK. Here the summary owns the flexible column and trims;
+           the buttons keep columns of their own and can never be pushed onto each other. -->
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <TextBlock x:Name="SummaryText" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,8,0"
+                   TextTrimming="CharacterEllipsis" Foreground="{DynamicResource TextSec}"/>
+        <Button Grid.Column="1" Style="{StaticResource LcGhostButton}" Content="Import…" Height="31" Padding="12,0"
+                Margin="4,0,0,0" Click="Import_Click" ToolTip="Load categories and rules from a filter preset file"/>
+        <Button Grid.Column="2" Style="{StaticResource LcGhostButton}" Content="Export…" Height="31" Padding="12,0"
+                Margin="4,0,0,0" Click="Export_Click" ToolTip="Save these categories and rules to a file you can share"/>
+        <Button Grid.Column="3" Style="{StaticResource LcButton}" Content="Cancel" Width="90" Height="31"
+                Margin="16,0,0,0" IsCancel="True"/>
+        <Button x:Name="OkButton" Grid.Column="4" Style="{StaticResource LcPrimaryButton}" Content="OK"
+                Width="96" Height="31" Margin="8,0,0,0" IsDefault="True" Click="Ok_Click"/>
+      </Grid>
+    </Border>
+
+    <!-- The two columns need room to be usable: a category list, and the refine rules under it. On a short
+         screen (a 1080p laptop at 150% is about 690 tall, and a set-up filter has rules and groups) squeezing
+         them slid the search box and the lists over each other. So they keep a minimum height and, when the
+         window is shorter than that, this area scrolls instead. ColumnsGrid is stretched to the window when it
+         is taller (see FilterWindow.xaml.cs), so a big window looks exactly as it did. -->
+    <ScrollViewer x:Name="ColumnsScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <Grid x:Name="ColumnsGrid" MinHeight="560">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/><ColumnDefinition Width="14"/><ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
+
+      <!-- ================= SOURCES ================= -->
+      <Border Grid.Column="0" Background="{DynamicResource Card}" BorderBrush="{DynamicResource Hairline}"
+              BorderThickness="1" CornerRadius="7" Padding="13">
+        <DockPanel LastChildFill="True">
+          <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,10">
+            <Rectangle Width="8" Height="8" RadiusX="2" RadiusY="2" Fill="{DynamicResource Accent}" VerticalAlignment="Center"/>
+            <TextBlock Text="What I model (sources)" FontWeight="SemiBold" FontSize="13" Margin="7,0,0,0"/>
+          </StackPanel>
+
+          <!-- refine: capped so the category list above always keeps room -->
+          <ScrollViewer DockPanel.Dock="Bottom" MaxHeight="340" VerticalScrollBarVisibility="Auto" Margin="0,10,0,0">
+          <StackPanel>
+            <Border BorderBrush="{DynamicResource Divider}" BorderThickness="0,1,0,0" Margin="0,0,0,9"/>
+            <TextBlock Text="REFINE — OPTIONAL" FontSize="10.5" FontWeight="SemiBold" Foreground="{DynamicResource TextMut}" Margin="0,0,0,3"/>
+            <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource TextMut}" FontSize="11" Margin="0,0,0,7"
+                       Text="Kept when every rule and every group holds. A group is an OR/AND bracket, so you can say (A or B) and C. Leave it empty to keep everything in the ticked categories."/>
+
+            <Border BorderBrush="{DynamicResource Hairline}" BorderThickness="1" CornerRadius="6" MinHeight="52" MaxHeight="140" Padding="4">
+              <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <ItemsControl x:Name="SourceRuleList" ItemTemplate="{StaticResource RuleRow}"/>
+              </ScrollViewer>
+            </Border>
+            <DockPanel Margin="0,5,0,0">
+              <Button DockPanel.Dock="Left" Style="{StaticResource LcButton}" Content="+ Add rule" Padding="10,0" Click="AddSourceRule_Click"/>
+              <Button DockPanel.Dock="Right" Style="{StaticResource LcGhostButton}" Content="Copy to targets &#8594;" Padding="8,0"
+                      Click="MirrorSourceToTarget_Click"
+                      ToolTip="Copy this side's rules onto the other. A rule set on one side only is the usual cause of a filter that looks like it leaks."/>
+            </DockPanel>
+
+            <Grid x:Name="SourceAndRow" Margin="0,8" Visibility="Collapsed">
+              <Border BorderBrush="{DynamicResource Hairline}" BorderThickness="0,1,0,0" VerticalAlignment="Center"/>
+              <Border Background="{DynamicResource Divider}" CornerRadius="4" Padding="10,2" HorizontalAlignment="Center">
+                <TextBlock Text="AND" FontSize="10" FontWeight="SemiBold" Foreground="{DynamicResource TextSec}"/>
+              </Border>
+            </Grid>
+
+            <ItemsControl x:Name="SourceGroupList" Margin="0,4,0,0" ItemTemplate="{StaticResource GroupBox}"/>
+            <Button HorizontalAlignment="Left" Style="{StaticResource LcButton}" Content="+ Add OR group" Padding="10,0" Margin="0,4,0,0"
+                    Click="AddSourceGroup_Click"
+                    ToolTip="A bracketed set like (Description is X OR System Type is Y), ANDed with the rules above"/>
+
+            <Expander x:Name="SourceAuditExpander" Margin="0,8,0,0" FontSize="11" Foreground="{DynamicResource TextMut}">
+              <Border BorderBrush="{DynamicResource Divider}" BorderThickness="1" CornerRadius="5" MaxHeight="110" Margin="0,3,0,0">
+                <ScrollViewer VerticalScrollBarVisibility="Auto"><ItemsControl x:Name="SourceAuditList" Margin="5"/></ScrollViewer>
+              </Border>
+            </Expander>
+
+            <Border Background="{DynamicResource ReadsBg}" BorderBrush="{DynamicResource ReadsBorder}" BorderThickness="1"
+                    CornerRadius="6" Padding="10,8" Margin="0,8,0,0">
+              <StackPanel>
+                <TextBlock Text="READS AS" FontSize="10" FontWeight="SemiBold" Foreground="{DynamicResource ReadsLabel}" Margin="0,0,0,3"/>
+                <TextBlock x:Name="SourceReadsAs" TextWrapping="Wrap" Foreground="{DynamicResource ReadsText}" FontSize="11.5" LineHeight="17"/>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+          </ScrollViewer>
+
+          <!-- categories fill -->
+          <DockPanel LastChildFill="True">
+            <TextBlock DockPanel.Dock="Top" Text="CATEGORIES" FontSize="10.5" FontWeight="SemiBold"
+                       Foreground="{DynamicResource TextMut}" Margin="0,0,0,5"/>
+            <TextBox x:Name="SourceCatSearch" DockPanel.Dock="Top" Style="{StaticResource LcTextBox}"
+                     TextChanged="CategorySearch_Changed" Margin="0,0,0,6"/>
+            <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,7">
+              <Button Style="{StaticResource LcButton}" Content="All" Padding="12,0" Margin="0,0,5,0" Click="SourceAll_Click"/>
+              <Button Style="{StaticResource LcButton}" Content="None" Padding="12,0" Margin="0,0,5,0" Click="SourceNone_Click"/>
+              <Button Style="{StaticResource LcButton}" Content="Match targets" Padding="10,0" Click="SourceMineOnly_Click"/>
+              <CheckBox x:Name="SourceShowEmpty" Content="Show empty" VerticalAlignment="Center" Margin="10,0,0,0"
+                        FontSize="11" Checked="CategorySearch_Changed2" Unchecked="CategorySearch_Changed2"/>
+            </StackPanel>
+            <Border BorderBrush="{DynamicResource Hairline}" BorderThickness="1" CornerRadius="6" MinHeight="150">
+              <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <ItemsControl x:Name="SourceList" Margin="6">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                      <CheckBox Content="{Binding Label}" IsChecked="{Binding IsChecked, Mode=TwoWay}" Margin="0,3"/>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </ScrollViewer>
+            </Border>
+          </DockPanel>
+        </DockPanel>
+      </Border>
+
+      <!-- ================= TARGETS ================= -->
+      <Border Grid.Column="2" Background="{DynamicResource Card}" BorderBrush="{DynamicResource Hairline}"
+              BorderThickness="1" CornerRadius="7" Padding="13">
+        <DockPanel LastChildFill="True">
+          <!-- Links sits HERE, not in the footer: a link contributes TARGETS, so what each
+               one adds belongs beside the target scope it feeds, where it is seen. -->
+          <DockPanel DockPanel.Dock="Top" Margin="0,0,0,10" LastChildFill="False">
+            <Rectangle DockPanel.Dock="Left" Width="8" Height="8" RadiusX="2" RadiusY="2"
+                       Fill="#C98A2C" VerticalAlignment="Center"/>
+            <TextBlock DockPanel.Dock="Left" Text="What I must not hit (targets)" FontWeight="SemiBold"
+                       FontSize="13" Margin="7,0,0,0" VerticalAlignment="Center"/>
+            <!-- Boxed (LcButton, not the borderless ghost) with black text: this is a real
+                 control that changes what gets checked, so it has to read as one. -->
+            <Button x:Name="LinksButton" DockPanel.Dock="Right" Style="{StaticResource LcButton}"
+                    Height="26" Padding="11,0" FontWeight="SemiBold" Foreground="{DynamicResource Text}"
+                    Click="Links_Click"
+                    ToolTip="Choose which links this set checks against, and which categories each contributes"/>
+          </DockPanel>
+
+          <ScrollViewer DockPanel.Dock="Bottom" MaxHeight="340" VerticalScrollBarVisibility="Auto" Margin="0,10,0,0">
+          <StackPanel>
+            <Border BorderBrush="{DynamicResource Divider}" BorderThickness="0,1,0,0" Margin="0,0,0,9"/>
+            <TextBlock Text="REFINE — OPTIONAL" FontSize="10.5" FontWeight="SemiBold" Foreground="{DynamicResource TextMut}" Margin="0,0,0,3"/>
+            <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource TextMut}" FontSize="11" Margin="0,0,0,7"
+                       Text="Kept when every rule and every group holds. A group is an OR/AND bracket, so you can say (A or B) and C. Leave it empty to keep everything in the ticked categories."/>
+
+            <Border BorderBrush="{DynamicResource Hairline}" BorderThickness="1" CornerRadius="6" MinHeight="52" MaxHeight="140" Padding="4">
+              <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <ItemsControl x:Name="TargetRuleList" ItemTemplate="{StaticResource RuleRow}"/>
+              </ScrollViewer>
+            </Border>
+            <DockPanel Margin="0,5,0,0">
+              <Button DockPanel.Dock="Left" Style="{StaticResource LcButton}" Content="+ Add rule" Padding="10,0" Click="AddTargetRule_Click"/>
+              <Button DockPanel.Dock="Right" Style="{StaticResource LcGhostButton}" Content="&#8592; Copy to sources" Padding="8,0"
+                      Click="MirrorTargetToSource_Click"
+                      ToolTip="Copy this side's rules onto the other. A rule set on one side only is the usual cause of a filter that looks like it leaks."/>
+            </DockPanel>
+
+            <Grid x:Name="TargetAndRow" Margin="0,8" Visibility="Collapsed">
+              <Border BorderBrush="{DynamicResource Hairline}" BorderThickness="0,1,0,0" VerticalAlignment="Center"/>
+              <Border Background="{DynamicResource Divider}" CornerRadius="4" Padding="10,2" HorizontalAlignment="Center">
+                <TextBlock Text="AND" FontSize="10" FontWeight="SemiBold" Foreground="{DynamicResource TextSec}"/>
+              </Border>
+            </Grid>
+
+            <ItemsControl x:Name="TargetGroupList" Margin="0,4,0,0" ItemTemplate="{StaticResource GroupBox}"/>
+            <Button HorizontalAlignment="Left" Style="{StaticResource LcButton}" Content="+ Add OR group" Padding="10,0" Margin="0,4,0,0"
+                    Click="AddTargetGroup_Click"
+                    ToolTip="A bracketed set like (Description is X OR System Type is Y), ANDed with the rules above"/>
+
+            <Expander x:Name="TargetAuditExpander" Margin="0,8,0,0" FontSize="11" Foreground="{DynamicResource TextMut}">
+              <Border BorderBrush="{DynamicResource Divider}" BorderThickness="1" CornerRadius="5" MaxHeight="110" Margin="0,3,0,0">
+                <ScrollViewer VerticalScrollBarVisibility="Auto"><ItemsControl x:Name="TargetAuditList" Margin="5"/></ScrollViewer>
+              </Border>
+            </Expander>
+
+            <Border Background="{DynamicResource ReadsBg}" BorderBrush="{DynamicResource ReadsBorder}" BorderThickness="1"
+                    CornerRadius="6" Padding="10,8" Margin="0,8,0,0">
+              <StackPanel>
+                <TextBlock Text="READS AS" FontSize="10" FontWeight="SemiBold" Foreground="{DynamicResource ReadsLabel}" Margin="0,0,0,3"/>
+                <TextBlock x:Name="TargetReadsAs" TextWrapping="Wrap" Foreground="{DynamicResource ReadsText}" FontSize="11.5" LineHeight="17"/>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+          </ScrollViewer>
+
+          <DockPanel LastChildFill="True">
+            <TextBlock DockPanel.Dock="Top" Text="CATEGORIES" FontSize="10.5" FontWeight="SemiBold"
+                       Foreground="{DynamicResource TextMut}" Margin="0,0,0,5"/>
+            <TextBox x:Name="TargetCatSearch" DockPanel.Dock="Top" Style="{StaticResource LcTextBox}"
+                     TextChanged="CategorySearch_Changed" Margin="0,0,0,6"/>
+            <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,7">
+              <Button Style="{StaticResource LcButton}" Content="All" Padding="12,0" Margin="0,0,5,0" Click="TargetAll_Click"/>
+              <Button Style="{StaticResource LcButton}" Content="None" Padding="12,0" Click="TargetNone_Click"/>
+              <CheckBox x:Name="TargetShowEmpty" Content="Show empty" VerticalAlignment="Center" Margin="10,0,0,0"
+                        FontSize="11" Checked="CategorySearch_Changed2" Unchecked="CategorySearch_Changed2"/>
+            </StackPanel>
+            <Border BorderBrush="{DynamicResource Hairline}" BorderThickness="1" CornerRadius="6" MinHeight="150">
+              <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <ItemsControl x:Name="TargetList" Margin="6">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                      <CheckBox Content="{Binding Label}" IsChecked="{Binding IsChecked, Mode=TwoWay}" Margin="0,3"/>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </ScrollViewer>
+            </Border>
+          </DockPanel>
+        </DockPanel>
+      </Border>
+    </Grid>
+    </ScrollViewer>
+  </DockPanel>
+</Window>

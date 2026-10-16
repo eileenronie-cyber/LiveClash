@@ -1,0 +1,88 @@
+<Window x:Class="LiveClash.UI.LinkScopeWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Live Clash — what each link contributes"
+        Width="560" Height="640"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False" ResizeMode="CanResize"
+        FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="12" UseLayoutRounding="True"
+        Foreground="{DynamicResource Text}" Background="{DynamicResource Bg}">
+
+  <Window.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.MergedDictionaries>
+        <ResourceDictionary Source="/LiveClash;component/UI/Theme.xaml"/>
+      </ResourceDictionary.MergedDictionaries>
+    </ResourceDictionary>
+  </Window.Resources>
+
+  <DockPanel LastChildFill="True" Margin="12">
+
+    <TextBlock x:Name="IntroText" DockPanel.Dock="Top" TextWrapping="Wrap" Foreground="{DynamicResource TextSec}"
+               Margin="0,0,0,10" LineHeight="17">
+      For each loaded link, choose what this set checks against. Untick the link to skip it
+      entirely, or untick individual categories to stop collecting those elements from it —
+      use it when a link brings in a whole discipline you are not coordinating against. This
+      does not change the categories on the Filter; it only narrows what each link adds.
+    </TextBlock>
+
+    <Border DockPanel.Dock="Bottom" BorderBrush="{DynamicResource Hairline}" BorderThickness="0,1,0,0"
+            Padding="0,10,0,0" Margin="0,10,0,0">
+      <!-- Grid, not DockPanel - see the same footer in FilterWindow.xaml: a long summary
+           slid Cancel underneath OK. -->
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <TextBlock x:Name="SummaryText" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,8,0"
+                   TextTrimming="CharacterEllipsis" Foreground="{DynamicResource TextSec}"/>
+        <Button Grid.Column="1" Style="{StaticResource LcButton}" Content="Cancel"
+                Width="90" Height="30" IsCancel="True"/>
+        <Button Grid.Column="2" Style="{StaticResource LcPrimaryButton}" Content="OK"
+                Width="96" Height="30" Margin="8,0,0,0" IsDefault="True" Click="Ok_Click"/>
+      </Grid>
+    </Border>
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+      <ItemsControl x:Name="LinkList">
+        <ItemsControl.ItemTemplate>
+          <DataTemplate>
+            <Border Margin="0,2,0,6" BorderBrush="{DynamicResource Hairline}" BorderThickness="0,0,0,1" Padding="0,0,0,4">
+              <DockPanel LastChildFill="True">
+                <CheckBox DockPanel.Dock="Left" VerticalAlignment="Top" Margin="0,5,6,0"
+                          IsChecked="{Binding Include, Mode=TwoWay}"
+                          ToolTip="Check this link at all in this set"/>
+                <Expander IsExpanded="{Binding Expanded, Mode=TwoWay}"
+                          IsEnabled="{Binding Include}">
+                  <Expander.Header>
+                    <TextBlock>
+                      <Run Text="{Binding Name, Mode=OneWay}" FontWeight="SemiBold"/>
+                      <Run Text="{Binding HeaderSuffix, Mode=OneWay}" Foreground="{DynamicResource TextMut}"/>
+                    </TextBlock>
+                  </Expander.Header>
+                  <StackPanel Margin="18,4,0,8">
+                    <DockPanel Margin="0,0,0,4" LastChildFill="False">
+                      <Button DockPanel.Dock="Left" Style="{StaticResource LcButton}" Content="All" Width="44" Height="24" Margin="0,0,4,0"
+                              Click="LinkAll_Click" Tag="{Binding}"/>
+                      <Button DockPanel.Dock="Left" Style="{StaticResource LcButton}" Content="None" Width="52" Height="24"
+                              Click="LinkNone_Click" Tag="{Binding}"/>
+                    </DockPanel>
+                    <ItemsControl ItemsSource="{Binding Categories}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                          <CheckBox Content="{Binding Label}" IsChecked="{Binding Collect, Mode=TwoWay}" Margin="0,2"/>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </StackPanel>
+                </Expander>
+              </DockPanel>
+            </Border>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
+    </ScrollViewer>
+  </DockPanel>
+</Window>

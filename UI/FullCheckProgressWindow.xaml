@@ -1,0 +1,41 @@
+<Window x:Class="LiveClash.UI.FullCheckProgressWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Live Clash — full check"
+        Width="440" SizeToContent="Height"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterScreen"
+        ShowInTaskbar="False" ShowActivated="False"
+        FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="12" UseLayoutRounding="True"
+        Foreground="{DynamicResource Text}" Background="{DynamicResource Bg}">
+
+  <Window.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.MergedDictionaries>
+        <ResourceDictionary Source="/LiveClash;component/UI/Theme.xaml"/>
+      </ResourceDictionary.MergedDictionaries>
+    </ResourceDictionary>
+  </Window.Resources>
+
+  <!-- This window lives on its OWN thread (see FullCheckProgress): the sweep blocks Revit's thread, and a
+       window on that thread could not repaint until the sweep was over. -->
+  <StackPanel Margin="22,20,22,18">
+    <TextBlock Text="Full check" FontSize="15" FontWeight="SemiBold"/>
+    <TextBlock x:Name="StageText" Foreground="{DynamicResource TextSec}" Margin="0,4,0,14"
+               Text="Getting ready…" TextWrapping="Wrap"/>
+
+    <ProgressBar x:Name="Bar" Style="{StaticResource LcProgressBar}" Height="8"
+                 Minimum="0" Maximum="100" Value="0"/>
+
+    <DockPanel Margin="0,10,0,0" LastChildFill="False">
+      <TextBlock x:Name="CountText" DockPanel.Dock="Left" Foreground="{DynamicResource TextSec}" Text=""/>
+      <TextBlock x:Name="PercentText" DockPanel.Dock="Right" FontWeight="SemiBold" Text=""/>
+    </DockPanel>
+    <TextBlock x:Name="TimeText" Foreground="{DynamicResource TextSec}" Margin="0,2,0,0" Text=""/>
+
+    <Border Margin="0,16,0,0" Padding="0,12,0,0" BorderBrush="{DynamicResource Hairline}" BorderThickness="0,1,0,0">
+      <TextBlock Foreground="{DynamicResource TextMut}" FontSize="11" TextWrapping="Wrap"
+                 Text="Revit is busy until this finishes and will respond again on its own. There is nothing to click."/>
+    </Border>
+  </StackPanel>
+</Window>

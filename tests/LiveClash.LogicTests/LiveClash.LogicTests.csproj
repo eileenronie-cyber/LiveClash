@@ -1,0 +1,90 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Headless regression runner for the Revit-FREE logic: filter serialization and the
+    legacy->rules migration. Runs on a build machine with NO Revit installed, because
+    it references the Nice3point reference assemblies (metadata only) and links in the
+    handful of Core source files those checks need. The assertions themselves live once,
+    in ..\..\Testing\FilterLogicChecks.cs, shared with the in-Revit SelfTest.
+
+        dotnet run  (from this project folder)
+
+    Exit code is the number of failed checks: 0 = all passed, for CI to gate on.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AssemblyName>LiveClash.LogicTests</AssemblyName>
+    <RootNamespace>LiveClash.LogicTests</RootNamespace>
+    <!-- Match the main tree so ParameterFilter's #if branches compile identically.
+         LOGICTESTS_HEADLESS marks code that must not touch an ElementId/XYZ-typed member even
+         to copy it — Nice3point's RevitAPI package here is metadata-only and unresolvable at
+         runtime, so merely JITting a method whose IL references one of those types throws
+         FileNotFoundException the first time it runs (see ClashResult.Clone). -->
+    <DefineConstants>$(DefineConstants);REVIT2025;R24_PLUS;LOGICTESTS_HEADLESS</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Reference-only Revit API: compiles against Element/Parameter/etc. with no
+         Revit install. The logic under test never calls into them at runtime. -->
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2025.*" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The runner itself. -->
+    <Compile Include="Program.cs" />
+
+    <!-- Shared assertions (single source of truth, also run by the in-Revit SelfTest).
+         SharedChecks is the one list both tiers run; add a block there, not here. -->
+    <Compile Include="..\..\Testing\SharedChecks.cs" Link="Shared\SharedChecks.cs" />
+    <Compile Include="..\..\Testing\FilterLogicChecks.cs" Link="Shared\FilterLogicChecks.cs" />
+    <Compile Include="..\..\Testing\StatusReplayChecks.cs" Link="Shared\StatusReplayChecks.cs" />
+    <Compile Include="..\..\Testing\ResolvedReplayChecks.cs" Link="Shared\ResolvedReplayChecks.cs" />
+    <Compile Include="..\..\Testing\LinkWatchChecks.cs" Link="Shared\LinkWatchChecks.cs" />
+    <Compile Include="..\..\Testing\ClashSearchChecks.cs" Link="Shared\ClashSearchChecks.cs" />
+    <Compile Include="..\..\Testing\ClashChangeChecks.cs" Link="Shared\ClashChangeChecks.cs" />
+    <Compile Include="..\..\Testing\ModelIdentityChecks.cs" Link="Shared\ModelIdentityChecks.cs" />
+    <Compile Include="..\..\Testing\CsvStampChecks.cs" Link="Shared\CsvStampChecks.cs" />
+
+    <!-- The Core files the checks compile against. Their Revit-calling methods are
+         never invoked here; only the serialization / migration / replay paths run. This
+         is the whole dependency surface: ParameterFilter -> ParamScope (in
+         ParameterReader) -> IdUtil, plus ClashStatusReplay, which depends on nothing at
+         all — it was split out of ClashStatusStore precisely so the ordering rules could
+         be asserted without a Revit document or a real triage file. -->
+    <Compile Include="..\..\Core\ParameterFilter.cs" Link="Core\ParameterFilter.cs" />
+    <Compile Include="..\..\Core\ParameterFilter.Serialization.cs" Link="Core\ParameterFilter.Serialization.cs" />
+    <Compile Include="..\..\Core\ParameterReader.cs" Link="Core\ParameterReader.cs" />
+    <Compile Include="..\..\Core\IdUtil.cs" Link="Core\IdUtil.cs" />
+    <Compile Include="..\..\Core\ClashStatusReplay.cs" Link="Core\ClashStatusReplay.cs" />
+    <Compile Include="..\..\Core\ResolvedLogReplay.cs" Link="Core\ResolvedLogReplay.cs" />
+    <!-- LinkWatch's pure half (notice, wording, age, state machine). The Revit-touching
+         half stays in LinkWatch.cs and is deliberately NOT linked - that split is why
+         this can run here at all. -->
+    <Compile Include="..\..\Core\LinkWatchState.cs" Link="Core\LinkWatchState.cs" />
+    <!-- The panel search's rule: pure, no Revit. -->
+    <Compile Include="..\..\Core\ClashSearch.cs" Link="Core\ClashSearch.cs" />
+    <!-- "What changed" after a link change: the comparison and its state machine. ClashResult is only a data class. -->
+    <Compile Include="..\..\Core\ClashResult.cs" Link="Core\ClashResult.cs" />
+    <Compile Include="..\..\Core\ClashGeometryKindValues.cs" Link="Core\ClashGeometryKindValues.cs" />
+    <Compile Include="..\..\Core\ClashChange.cs" Link="Core\ClashChange.cs" />
+    <Compile Include="..\..\Core\ClashChangeTracker.cs" Link="Core\ClashChangeTracker.cs" />
+    <!-- The sync-study collision guard: pure decision logic (Resolve/RecordedIn); Compute needs
+         a live Document and is exercised only in-Revit. ReadRecorded/Claim do real file I/O and
+         log through Log.cs, which is Revit-free and linked in for exactly that reason. -->
+    <Compile Include="..\..\Core\ModelIdentity.cs" Link="Core\ModelIdentity.cs" />
+    <Compile Include="..\..\Core\ShortHash.cs" Link="Core\ShortHash.cs" />
+    <Compile Include="..\..\Core\Log.cs" Link="Core\Log.cs" />
+    <!-- The export stamp and the CSV quoting rule: pure, no Revit. -->
+    <Compile Include="..\..\Core\CsvText.cs" Link="Core\CsvText.cs" />
+    <Compile Include="..\..\Core\CsvStamp.cs" Link="Core\CsvStamp.cs" />
+  </ItemGroup>
+
+</Project>

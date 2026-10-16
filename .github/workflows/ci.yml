@@ -1,0 +1,42 @@
+﻿# LiveClash CI.
+#
+# Runs on every push and pull request. There is deliberately no
+# Revit on the runner: the build uses the Nice3point reference assemblies
+# (RevitApiSource=NuGet), so it compiles every supported runtime without a licence.
+#
+# What it gates (see ci/gate.ps1, the single source of truth):
+#   * compile: net48 / net8 / net10  (Revit 2024 / 2025 / 2026) from NuGet refs,
+#     in Release; plus one Debug build
+#   * logic tests: the Revit-free serialization + migration checks, executed
+#
+# What it CANNOT gate: geometry verification, ClashResult.MakeKey and the
+# BooleanOperations only exist inside Revit's process, so CI cannot run them.
+
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  gate:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET SDKs
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Run CI gate (compile x3 Release + 1 Debug + headless logic tests)
+        shell: pwsh
+        run: ./ci/gate.ps1
+

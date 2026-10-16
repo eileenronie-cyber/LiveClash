@@ -1,0 +1,341 @@
+<UserControl x:Class="LiveClash.UI.ClashPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ui="clr-namespace:LiveClash.UI"
+             MinWidth="320" MinHeight="200"
+             FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="12" UseLayoutRounding="True"
+             Foreground="{DynamicResource Text}" Background="{DynamicResource Bg}">
+
+  <UserControl.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.MergedDictionaries>
+        <ResourceDictionary Source="/LiveClash;component/UI/Theme.xaml"/>
+      </ResourceDictionary.MergedDictionaries>
+    </ResourceDictionary>
+  </UserControl.Resources>
+
+  <DockPanel LastChildFill="True">
+
+    <!-- Live + summary strip -->
+    <Border DockPanel.Dock="Top" Padding="10,7" Background="{DynamicResource Card}"
+            BorderBrush="{DynamicResource Divider}" BorderThickness="0,0,0,1">
+      <!-- A Grid with the counts in a WrapPanel, not a DockPanel: a DockPanel docks the
+           left-hand items first, so a real summary ("208 hard, 12 clearance -> 41 issues,
+           5 hidden (3 queued)") used up the strip and cut the Show all / Group toggles down
+           to "Show a". Here the toggles keep columns of their own and the counts wrap onto a
+           second line rather than squeezing anything out. -->
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <CheckBox x:Name="LiveCheck" Grid.Column="0" Content="Live" VerticalAlignment="Center" Margin="0,0,12,0"
+                  FontWeight="SemiBold"
+                  Checked="LiveCheck_Changed" Unchecked="LiveCheck_Changed"
+                  ToolTip="Check clashes automatically as you model"/>
+        <WrapPanel Grid.Column="1" VerticalAlignment="Center" Orientation="Horizontal">
+          <TextBlock x:Name="CountText" VerticalAlignment="Center" FontWeight="SemiBold" Text="0 clashes"/>
+          <TextBlock x:Name="GroupText" VerticalAlignment="Center" Margin="10,0,0,0"
+                     Foreground="{DynamicResource Accent}" FontWeight="SemiBold" Text=""/>
+          <TextBlock x:Name="PendingText" VerticalAlignment="Center" Margin="10,0,0,0"
+                     Foreground="{DynamicResource TextMut}" Text=""/>
+        </WrapPanel>
+        <CheckBox x:Name="ShowAllCheck" Grid.Column="2" Content="Show all" VerticalAlignment="Center" Margin="8,0,0,0"
+                  Checked="ShowAllCheck_Changed" Unchecked="ShowAllCheck_Changed"
+                  ToolTip="Include issues marked Coordinated or Ignored"/>
+        <CheckBox x:Name="GroupCheck" Grid.Column="3" Content="Group" VerticalAlignment="Center" Margin="12,0,0,0"
+                  Checked="GroupCheck_Changed" Unchecked="GroupCheck_Changed"
+                  ToolTip="Collapse nearby clashes into one row per coordination issue"/>
+      </Grid>
+    </Border>
+
+    <!-- action toolbar -->
+    <Border DockPanel.Dock="Top" Padding="8,7" Background="{DynamicResource ToolbarBg}"
+            BorderBrush="{DynamicResource Hairline}" BorderThickness="0,0,0,1">
+      <WrapPanel Orientation="Horizontal">
+        <Button x:Name="FullCheckButton" Style="{StaticResource LcPrimaryButton}" Content="Full check"
+                Margin="0,2,5,2" Click="FullCheckButton_Click"
+                ToolTip="Sweep every source element once, to establish a baseline"/>
+        <TextBlock x:Name="ScopeIndicator" VerticalAlignment="Center" Margin="0,2,10,2"
+                   FontSize="11" Text=""
+                   ToolTip="Estimated cost of a full check with the current filter"/>
+        <Button x:Name="RecheckButton" Style="{StaticResource LcButton}" Content="Recheck"
+                Margin="0,2,5,2" Click="RecheckButton_Click"
+                ToolTip="Re-verify the clashes already listed (fast) — catches fixes made in a link or while Live was paused"/>
+        <Button x:Name="ClearButton" Style="{StaticResource LcButton}" Content="Clear"
+                Margin="0,2,10,2" Click="ClearButton_Click"/>
+        <Button x:Name="FilterButton" Style="{StaticResource LcButton}" Content="Filter…"
+                Margin="0,2,5,2" Click="FilterButton_Click"
+                ToolTip="Choose which categories are checked, and what they are checked against"/>
+        <Button x:Name="AuditButton" Style="{StaticResource LcButton}" Content="Audit…"
+                Margin="0,2,5,2" Click="AuditButton_Click"
+                ToolTip="Find geometry that clashes but was never meant to obstruct: openings, reserved space, placeholders, plant with no connector"/>
+        <Button x:Name="ResolvedButton" Style="{StaticResource LcButton}" Content="Record…"
+                Margin="0,2,5,2" Click="ResolvedButton_Click"
+                ToolTip="The coordination record: pending, coordinated, ignored and resolved pairs"/>
+        <Button x:Name="ExportButton" Style="{StaticResource LcButton}" Content="Export…"
+                Margin="0,2,5,2" Click="ExportButton_Click"
+                ToolTip="Write the register to a CSV the coordination meeting can open"/>
+      </WrapPanel>
+    </Border>
+
+    <!-- what changed: after a link change and a check, which clashes are new and which have cleared. Its own strip
+         under the link notice - the notice says a change happened; this says what it did. -->
+    <Border x:Name="WhatChangedBar" DockPanel.Dock="Top" Visibility="Collapsed" Padding="10,7"
+            Background="{DynamicResource AccentSoft}"
+            BorderBrush="{DynamicResource Hairline}" BorderThickness="0,0,0,1">
+      <StackPanel>
+        <DockPanel LastChildFill="True">
+          <Button x:Name="WhatChangedDismiss" DockPanel.Dock="Right" Style="{StaticResource LcButton}"
+                  Content="Dismiss" Margin="8,0,0,0" Click="WhatChangedDismiss_Click"/>
+          <TextBlock x:Name="WhatChangedText" VerticalAlignment="Center" TextWrapping="Wrap"
+                     Foreground="{DynamicResource Text}" FontWeight="SemiBold"/>
+        </DockPanel>
+        <TextBlock x:Name="WhatChangedCaveat" Visibility="Collapsed" TextWrapping="Wrap" Margin="0,3,0,0" FontSize="11"
+                   Foreground="{DynamicResource TextSec}"/>
+        <WrapPanel Margin="0,6,0,0">
+          <CheckBox x:Name="OnlyNewCheck" Content="Only new" Margin="0,0,14,0"
+                    Checked="ChangeView_Changed" Unchecked="ChangeView_Changed"
+                    ToolTip="Show just the clashes that were not there before the change"/>
+          <CheckBox x:Name="ShowClearedCheck" Content="Show cleared"
+                    Checked="ChangeView_Changed" Unchecked="ChangeView_Changed"
+                    ToolTip="List the clashes that are gone, struck through, under the rest"/>
+        </WrapPanel>
+      </StackPanel>
+    </Border>
+
+    <!-- search: narrows the list to the rows that contain every word typed. Applied INSIDE the list rebuild
+         (ClashPanel.Refresh), not once when the text changes - the list is rebuilt on every live edit and every
+         background verification, and a filter applied only on typing would drop away within seconds. -->
+    <Border DockPanel.Dock="Top" Padding="8,6" Background="{DynamicResource Bg}"
+            BorderBrush="{DynamicResource Hairline}" BorderThickness="0,0,0,1">
+      <Grid>
+        <TextBox x:Name="SearchBox" Style="{StaticResource LcTextBox}" Padding="8,0,30,0"
+                 TextChanged="Search_Changed" KeyDown="Search_KeyDown"
+                 ToolTip="Narrow the list. Type part of an element name, category, model, set or note; several words must all match, and quotes keep a phrase together. Esc clears."/>
+        <TextBlock x:Name="SearchHint" IsHitTestVisible="False" VerticalAlignment="Center" Margin="10,0,30,0"
+                   Foreground="{DynamicResource TextMut}" Text="Search element, category, model&#8230;"/>
+        <Button x:Name="SearchClear" Style="{StaticResource LcGhostButton}" Content="&#x2715;" Visibility="Collapsed"
+                HorizontalAlignment="Right" Width="24" Height="21" Padding="0" Margin="0,0,3,0"
+                Click="SearchClear_Click" ToolTip="Clear the search"/>
+      </Grid>
+    </Border>
+
+    <!-- link-change notice: hidden until a link is loaded, unloaded, reloaded, or an
+         instance is added, moved or removed since the last full check. Its own strip,
+         not the empty-state banner below — that banner hides whenever the list has
+         rows, and this matters most exactly when it does: existing rows may already
+         be stale, and new ones may be missing entirely, from a change nothing on
+         screen otherwise shows. -->
+    <Border x:Name="LinkNoticeBar" DockPanel.Dock="Top" Visibility="Collapsed" Padding="10,7"
+            Background="{DynamicResource EndsInBg}"
+            BorderBrush="{DynamicResource Hairline}" BorderThickness="0,0,0,1">
+      <DockPanel LastChildFill="True">
+        <Button x:Name="LinkNoticeDismiss" DockPanel.Dock="Right" Style="{StaticResource LcButton}"
+                Content="Dismiss" Margin="8,0,0,0" Click="LinkNoticeDismiss_Click"/>
+        <Button x:Name="LinkNoticeFullCheck" DockPanel.Dock="Right" Style="{StaticResource LcButton}"
+                Content="Full check" Margin="8,0,0,0" Click="FullCheckButton_Click"
+                ToolTip="Recheck only re-tests what is already listed; a link change can create clashes elsewhere too."/>
+        <TextBlock x:Name="LinkNoticeText" VerticalAlignment="Center" TextWrapping="Wrap"
+                   Foreground="{DynamicResource EndsInFg}" FontWeight="SemiBold"/>
+      </DockPanel>
+    </Border>
+
+    <!-- status bar -->
+    <Border DockPanel.Dock="Bottom" Padding="10,5" Background="{DynamicResource StatusBg}"
+            BorderBrush="{DynamicResource Hairline}" BorderThickness="0,1,0,0">
+      <TextBlock x:Name="StatusText" Foreground="{DynamicResource TextSec}" TextTrimming="CharacterEllipsis"
+                 Text="Click a row to select it in the model, then use Selection Box (BX)."/>
+    </Border>
+
+    <!-- results, with an empty-state banner overlaid on top -->
+    <Grid>
+      <ListView x:Name="ResultList" BorderThickness="0" Background="{DynamicResource Bg}"
+                SelectionChanged="ResultList_SelectionChanged"
+                GridViewColumnHeader.Click="Header_Click"
+                ScrollViewer.HorizontalScrollBarVisibility="Auto">
+      <ListView.ContextMenu>
+        <ContextMenu>
+          <MenuItem Header="Mark _Pending" Click="MarkPending_Click"/>
+          <MenuItem Header="Mark _Coordinated (accepted — stops nagging)" Click="MarkCoordinated_Click"/>
+          <MenuItem Header="Mark _Ignored (false positive)" Click="MarkIgnored_Click"/>
+          <Separator/>
+          <MenuItem Header="Add or edit _note…" Click="Note_Click"/>
+          <Separator/>
+          <MenuItem Header="Clear status (back to New)" Click="MarkNew_Click"/>
+        </ContextMenu>
+      </ListView.ContextMenu>
+      <ListView.View>
+        <GridView ColumnHeaderContainerStyle="{StaticResource LcHeader}">
+
+          <GridViewColumn Header="" Width="26">
+            <GridViewColumn.CellTemplate>
+              <DataTemplate>
+                <Ellipse Width="10" Height="10" Fill="{Binding SeverityBrush}"
+                         ToolTip="{Binding SeverityText}"/>
+              </DataTemplate>
+            </GridViewColumn.CellTemplate>
+          </GridViewColumn>
+
+          <!-- How the two meet — the single most useful triage signal, now an
+               emphasized colored chip: "through" a real penetration, "ends in" a
+               missing connector, "inside" fully enclosed. -->
+          <GridViewColumn Header="Type" Width="86">
+            <GridViewColumn.CellTemplate>
+              <DataTemplate>
+                <Border x:Name="chip" Style="{StaticResource LcChip}" Visibility="Collapsed"
+                        ToolTip="{Binding KindTip}">
+                  <TextBlock x:Name="chipT" Text="{Binding KindText}" FontSize="11" FontWeight="SemiBold"/>
+                </Border>
+                <DataTemplate.Triggers>
+                  <DataTrigger Binding="{Binding KindText}" Value="through">
+                    <Setter TargetName="chip" Property="Visibility" Value="Visible"/>
+                    <Setter TargetName="chip" Property="Background" Value="{DynamicResource ThroughBg}"/>
+                    <Setter TargetName="chipT" Property="Foreground" Value="{DynamicResource ThroughFg}"/>
+                  </DataTrigger>
+                  <DataTrigger Binding="{Binding KindText}" Value="ends in">
+                    <Setter TargetName="chip" Property="Visibility" Value="Visible"/>
+                    <Setter TargetName="chip" Property="Background" Value="{DynamicResource EndsInBg}"/>
+                    <Setter TargetName="chipT" Property="Foreground" Value="{DynamicResource EndsInFg}"/>
+                  </DataTrigger>
+                  <DataTrigger Binding="{Binding KindText}" Value="ends in*">
+                    <Setter TargetName="chip" Property="Visibility" Value="Visible"/>
+                    <Setter TargetName="chip" Property="Background" Value="{DynamicResource EndsInBg}"/>
+                    <Setter TargetName="chipT" Property="Foreground" Value="{DynamicResource EndsInFg}"/>
+                  </DataTrigger>
+                  <DataTrigger Binding="{Binding KindText}" Value="inside">
+                    <Setter TargetName="chip" Property="Visibility" Value="Visible"/>
+                    <Setter TargetName="chip" Property="Background" Value="{DynamicResource InsideBg}"/>
+                    <Setter TargetName="chipT" Property="Foreground" Value="{DynamicResource InsideFg}"/>
+                  </DataTrigger>
+                </DataTemplate.Triggers>
+              </DataTemplate>
+            </GridViewColumn.CellTemplate>
+          </GridViewColumn>
+
+          <!-- new since a link change (only while a "what changed" summary is showing) -->
+          <GridViewColumn x:Name="NewTagColumn" Header="" Width="0">
+            <GridViewColumn.CellTemplate>
+              <DataTemplate>
+                <TextBlock Text="{Binding NewText}" FontSize="9.5" FontWeight="Bold" Foreground="{DynamicResource AccentText}"
+                           VerticalAlignment="Center" ToolTip="{Binding NewTip}"/>
+              </DataTemplate>
+            </GridViewColumn.CellTemplate>
+          </GridViewColumn>
+
+          <!-- placeholder-family flag -->
+          <GridViewColumn Header="" Width="22">
+            <GridViewColumn.CellTemplate>
+              <DataTemplate>
+                <TextBlock Text="{Binding ProvisionalText}" Foreground="#B8860B"
+                           FontWeight="Bold" ToolTip="{Binding ProvisionalTip}"/>
+              </DataTemplate>
+            </GridViewColumn.CellTemplate>
+          </GridViewColumn>
+
+          <!-- insulation-only hit: the bare pipe/duct is clear, its insulation is not -->
+          <GridViewColumn Header="" Width="22">
+            <GridViewColumn.CellTemplate>
+              <DataTemplate>
+                <TextBlock Text="{Binding InsulatedText}" Foreground="{DynamicResource AccentText}"
+                           FontWeight="Bold" ToolTip="{Binding InsulatedTip}"/>
+              </DataTemplate>
+            </GridViewColumn.CellTemplate>
+          </GridViewColumn>
+
+          <GridViewColumn Header="" Width="22">
+            <GridViewColumn.CellTemplate>
+              <DataTemplate>
+                <TextBlock Text="{Binding ExpanderText}" FontSize="11" Foreground="{DynamicResource TextSec}"
+                           Cursor="Hand" MouseLeftButtonUp="Expander_Click"/>
+              </DataTemplate>
+            </GridViewColumn.CellTemplate>
+          </GridViewColumn>
+          <GridViewColumn Header="" Width="34" DisplayMemberBinding="{Binding CountText}"/>
+
+          <GridViewColumn Header="Element" Width="180">
+            <GridViewColumn.CellTemplate>
+              <DataTemplate>
+                <TextBlock Text="{Binding HostText}" Margin="{Binding Indent}"
+                           TextDecorations="{Binding Decorations}" TextTrimming="CharacterEllipsis"
+                           ToolTip="{Binding HostText}" ui:TruncationTip.OnlyWhenCut="True"/>
+              </DataTemplate>
+            </GridViewColumn.CellTemplate>
+          </GridViewColumn>
+
+          <!-- direction cue, so Element -> Clashes with reads as a pair -->
+          <GridViewColumn Header="" Width="22">
+            <GridViewColumn.CellTemplate>
+              <DataTemplate>
+                <TextBlock Text="&#8594;" Foreground="{DynamicResource TextMut}" HorizontalAlignment="Center"/>
+              </DataTemplate>
+            </GridViewColumn.CellTemplate>
+          </GridViewColumn>
+
+                    <GridViewColumn Header="Clashes with" Width="190">
+            <GridViewColumn.CellTemplate>
+              <DataTemplate>
+                <TextBlock Text="{Binding OtherText}" Margin="2,0" TextTrimming="CharacterEllipsis"
+                           ToolTip="{Binding OtherText}" ui:TruncationTip.OnlyWhenCut="True"/>
+              </DataTemplate>
+            </GridViewColumn.CellTemplate>
+          </GridViewColumn>
+                    <GridViewColumn x:Name="SetColumn" Header="Set" Width="130">
+            <GridViewColumn.CellTemplate>
+              <DataTemplate>
+                <TextBlock Text="{Binding SetText}" Margin="2,0" TextTrimming="CharacterEllipsis"
+                           ToolTip="{Binding SetText}" ui:TruncationTip.OnlyWhenCut="True"/>
+              </DataTemplate>
+            </GridViewColumn.CellTemplate>
+          </GridViewColumn>
+                    <GridViewColumn Header="Model" Width="150">
+            <GridViewColumn.CellTemplate>
+              <DataTemplate>
+                <TextBlock Text="{Binding ModelName}" Margin="2,0" TextTrimming="CharacterEllipsis"
+                           ToolTip="{Binding ModelName}" ui:TruncationTip.OnlyWhenCut="True"/>
+              </DataTemplate>
+            </GridViewColumn.CellTemplate>
+          </GridViewColumn>
+          <GridViewColumn Header="Status" Width="90">
+            <GridViewColumn.CellTemplate>
+              <DataTemplate>
+                <TextBlock Text="{Binding StatusText}" Foreground="{Binding StatusBrush}"
+                           FontWeight="SemiBold" TextDecorations="{Binding Decorations}"/>
+              </DataTemplate>
+            </GridViewColumn.CellTemplate>
+          </GridViewColumn>
+                    <GridViewColumn Header="Note" Width="150">
+            <GridViewColumn.CellTemplate>
+              <DataTemplate>
+                <TextBlock Text="{Binding NoteText}" Margin="2,0" TextTrimming="CharacterEllipsis"
+                           ToolTip="{Binding NoteText}" ui:TruncationTip.OnlyWhenCut="True"/>
+              </DataTemplate>
+            </GridViewColumn.CellTemplate>
+          </GridViewColumn>
+          <GridViewColumn Header="Found" Width="70" DisplayMemberBinding="{Binding TimeText}"/>
+        </GridView>
+      </ListView.View>
+      </ListView>
+
+      <!-- Empty-state banner. The status line at the bottom scrolls away and is easy to
+           miss; when the list is empty the reason belongs where the rows would be, with
+           the fix one click away. Live only ever checks what you EDIT, so after a filter
+           change nothing reappears on its own - that trap is what this exists to explain. -->
+      <Border x:Name="EmptyBanner" Visibility="Collapsed" Background="{DynamicResource Bg}"
+              VerticalAlignment="Stretch" HorizontalAlignment="Stretch" Padding="24">
+        <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="380">
+          <TextBlock x:Name="EmptyTitle" FontSize="14" FontWeight="SemiBold" TextAlignment="Center"
+                     Foreground="{DynamicResource Text}" TextWrapping="Wrap"/>
+          <TextBlock x:Name="EmptyDetail" Margin="0,7,0,0" TextAlignment="Center" FontSize="11.5"
+                     Foreground="{DynamicResource TextSec}" TextWrapping="Wrap" LineHeight="17"/>
+          <Button x:Name="EmptyAction" Style="{StaticResource LcButton}" Content="Run full check"
+                  Height="29" Padding="16,0" Margin="0,14,0,0" HorizontalAlignment="Center"
+                  FontWeight="SemiBold" Foreground="{DynamicResource Text}" Click="EmptyAction_Click"/>
+        </StackPanel>
+      </Border>
+    </Grid>
+
+  </DockPanel>
+</UserControl>

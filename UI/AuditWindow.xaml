@@ -1,0 +1,156 @@
+<Window x:Class="LiveClash.UI.AuditWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Live Clash — What clashes but isn't a clash"
+        Width="1120" Height="680"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False" ResizeMode="CanResize"
+        FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="12" UseLayoutRounding="True"
+        Foreground="{DynamicResource Text}" Background="{DynamicResource Bg}">
+
+  <Window.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.MergedDictionaries>
+        <ResourceDictionary Source="/LiveClash;component/UI/Theme.xaml"/>
+      </ResourceDictionary.MergedDictionaries>
+
+      <!-- flat data-grid header -->
+      <Style x:Key="AuditHeader" TargetType="{x:Type DataGridColumnHeader}">
+        <Setter Property="Background" Value="{DynamicResource HeaderBg}"/>
+        <Setter Property="Foreground" Value="{DynamicResource TextMut}"/>
+        <Setter Property="FontSize" Value="10.5"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="Padding" Value="10,7"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource Hairline}"/>
+        <Setter Property="BorderThickness" Value="0,0,0,1"/>
+        <Setter Property="HorizontalContentAlignment" Value="Left"/>
+      </Style>
+
+      <!-- cells: no system-blue block and no dotted focus box; the row carries the selection -->
+      <Style x:Key="AuditCell" TargetType="{x:Type DataGridCell}">
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+        <Setter Property="BorderBrush" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      </Style>
+
+      <!-- plain text cells sit on the middle of the row, level with the Why box -->
+      <Style x:Key="AuditText" TargetType="TextBlock">
+        <Setter Property="VerticalAlignment" Value="Center"/>
+      </Style>
+
+      <!-- rows: hover, a soft tint on the ones ticked to drop, and a stronger one when selected -->
+      <Style x:Key="AuditRow" TargetType="{x:Type DataGridRow}">
+        <Setter Property="Background" Value="{DynamicResource Card}"/>
+        <Style.Triggers>
+          <Trigger Property="IsMouseOver" Value="True">
+            <Setter Property="Background" Value="{DynamicResource RowHover}"/>
+          </Trigger>
+          <DataTrigger Binding="{Binding IsChecked}" Value="True">
+            <Setter Property="Background" Value="{DynamicResource TickTint}"/>
+          </DataTrigger>
+          <Trigger Property="IsSelected" Value="True">
+            <Setter Property="Background" Value="{DynamicResource SelectBg}"/>
+          </Trigger>
+        </Style.Triggers>
+      </Style>
+    </ResourceDictionary>
+  </Window.Resources>
+
+  <DockPanel LastChildFill="True" Margin="14">
+
+    <TextBlock DockPanel.Dock="Top" TextWrapping="Wrap" Margin="0,0,0,10" Foreground="{DynamicResource TextSec}" LineHeight="18">
+      Geometry that reports as a clash but was never meant to be an obstruction:
+      modelled <Bold>openings</Bold>, reserved <Bold>space</Bold>, unresolved <Bold>placeholders</Bold>,
+      and <Bold>plant with no connector</Bold> that services run into.
+      Nothing here is excluded until you tick it. The <Bold>Why</Bold> column is a guess from
+      naming — edit it, or type your own, and this model remembers it next time.
+    </TextBlock>
+
+    <!-- footer -->
+    <Border DockPanel.Dock="Bottom" BorderBrush="{DynamicResource Hairline}" BorderThickness="0,1,0,0"
+            Padding="0,12,0,0" Margin="0,12,0,0">
+      <DockPanel LastChildFill="False">
+        <TextBlock x:Name="SummaryText" DockPanel.Dock="Left" VerticalAlignment="Center" Foreground="{DynamicResource TextSec}"/>
+        <Button x:Name="CloseButton" DockPanel.Dock="Right" Style="{StaticResource LcButton}" Content="Close"
+                Width="90" Height="31" Margin="8,0,0,0" IsCancel="True"/>
+        <Button x:Name="ApplyButton" DockPanel.Dock="Right" Style="{StaticResource LcPrimaryButton}" Content="Drop the ticked"
+                Width="136" Height="31" Margin="8,0,0,0" IsDefault="True" Click="Apply_Click"
+                ToolTip="Adds the ticked family names to the Drop list, which applies to every clash set"/>
+        <Button x:Name="SaveLabelsButton" DockPanel.Dock="Right" Style="{StaticResource LcButton}" Content="Save labels"
+                Width="104" Height="31" Margin="8,0,0,0" Click="SaveLabels_Click"
+                ToolTip="Remember the Why column against this model, without dropping anything"/>
+      </DockPanel>
+    </Border>
+
+    <!-- toolbar -->
+    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,8">
+      <Button Style="{StaticResource LcButton}" Content="Tick all" Padding="11,0" Margin="0,0,5,0" Click="All_Click"/>
+      <Button Style="{StaticResource LcButton}" Content="Tick none" Padding="11,0" Margin="0,0,5,0" Click="None_Click"/>
+      <Button Style="{StaticResource LcButton}" Content="Tick by label" Padding="11,0" Margin="0,0,12,0" Click="Retick_Click"
+              ToolTip="Set every tick from whether its label is one you normally drop"/>
+      <TextBox x:Name="Search" Style="{StaticResource LcTextBox}" Width="260" TextChanged="Search_Changed"/>
+      <CheckBox x:Name="DropDefault" Content="New labels drop by default" VerticalAlignment="Center"
+                Margin="14,0,0,0" FontSize="11" Foreground="{DynamicResource TextSec}"
+                ToolTip="Applies to a label you type that does not exist yet"/>
+    </StackPanel>
+
+    <Border BorderBrush="{DynamicResource Hairline}" BorderThickness="1" CornerRadius="7" ClipToBounds="True">
+      <DataGrid x:Name="Grid" AutoGenerateColumns="False" HeadersVisibility="Column"
+                CanUserAddRows="False" CanUserDeleteRows="False" IsReadOnly="False"
+                GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="{DynamicResource GridLine}"
+                Background="{DynamicResource Card}" RowBackground="{DynamicResource Card}"
+                BorderThickness="0" RowHeaderWidth="0" SelectionMode="Extended"
+                ColumnHeaderStyle="{StaticResource AuditHeader}" RowStyle="{StaticResource AuditRow}"
+                CellStyle="{StaticResource AuditCell}"
+                FontSize="12" RowHeight="30">
+        <DataGrid.Columns>
+          <DataGridCheckBoxColumn Header="Drop" Width="46"
+                                  ElementStyle="{StaticResource LcGridCheckBox}"
+                                  EditingElementStyle="{StaticResource LcGridCheckBoxEditing}"
+                                  Binding="{Binding IsChecked, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
+
+          <!-- Editable on purpose: the detector guesses from naming; only the
+               coordinator knows whether this project calls it a provision, a
+               builders-work item or a fire-package hold. Typing a name creates it. -->
+          <DataGridTemplateColumn Header="Why" Width="170">
+            <DataGridTemplateColumn.CellTemplate>
+              <DataTemplate>
+                <ComboBox IsEditable="True" BorderThickness="0" Background="Transparent" Margin="0,-2"
+                          ItemsSource="{Binding DataContext.LabelNames, RelativeSource={RelativeSource AncestorType=Window}}"
+                          Text="{Binding Label, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                          ToolTip="{Binding DetectedAs}"/>
+              </DataTemplate>
+            </DataGridTemplateColumn.CellTemplate>
+          </DataGridTemplateColumn>
+
+          <DataGridTextColumn Header="Instances" Width="80" IsReadOnly="True" Binding="{Binding InstanceCount}">
+            <DataGridTextColumn.ElementStyle>
+              <Style TargetType="TextBlock" BasedOn="{StaticResource AuditText}">
+                <Setter Property="HorizontalAlignment" Value="Right"/>
+                <Setter Property="Margin" Value="0,0,10,0"/>
+                <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+              </Style>
+            </DataGridTextColumn.ElementStyle>
+          </DataGridTextColumn>
+          <DataGridTextColumn Header="Category" Width="125" IsReadOnly="True" Binding="{Binding CategoryName}" ElementStyle="{StaticResource AuditText}"/>
+          <DataGridTextColumn Header="Model" Width="110" IsReadOnly="True" Binding="{Binding Model}" ElementStyle="{StaticResource AuditText}"/>
+          <DataGridTextColumn Header="Family" Width="175" IsReadOnly="True" Binding="{Binding FamilyName}" ElementStyle="{StaticResource AuditText}"/>
+          <DataGridTextColumn Header="Type" Width="150" IsReadOnly="True" Binding="{Binding TypeName}" ElementStyle="{StaticResource AuditText}"/>
+          <DataGridTextColumn Header="Evidence" Width="*" IsReadOnly="True" Binding="{Binding Evidence}">
+            <DataGridTextColumn.ElementStyle>
+              <Style TargetType="TextBlock" BasedOn="{StaticResource AuditText}">
+                <Setter Property="FontFamily" Value="Cascadia Mono, Consolas"/>
+                <Setter Property="FontSize" Value="11"/>
+                <Setter Property="Foreground" Value="{DynamicResource TextSec}"/>
+                <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                <Setter Property="ToolTip" Value="{Binding Evidence}"/>
+              </Style>
+            </DataGridTextColumn.ElementStyle>
+          </DataGridTextColumn>
+        </DataGrid.Columns>
+      </DataGrid>
+    </Border>
+  </DockPanel>
+</Window>

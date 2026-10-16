@@ -1,0 +1,20 @@
+# Build output.
+bin/
+obj/
+
+# Visual Studio / Rider / VS Code local state
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+*.userprefs
+
+# Per-machine, per-model runtime data written to %LOCALAPPDATA%\LiveClash,
+# never inside the repo — listed here only so a stray copy is not committed.
+*.log
+settings/
+audit/
+
+# Office lock files: present while a workbook is open, never source.
+~$*

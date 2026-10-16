@@ -1,0 +1,112 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Build for a specific Revit version:
+        dotnet build -p:RevitVersion=2024
+        dotnet build -p:RevitVersion=2026        (default)
+
+    If Revit is not installed in the default location, override the folder:
+        dotnet build -p:RevitVersion=2026 -p:RevitInstallDir="D:\Autodesk\Revit 2026\"
+  -->
+
+  <PropertyGroup>
+    <RevitVersion Condition="'$(RevitVersion)' == ''">2026</RevitVersion>
+
+    <!-- Runtime per Revit version, per RevitAPI.runtimeconfig.json in each install:
+         2026+ .NET 10, 2025 .NET 8, 2024 and earlier .NET Framework 4.8 -->
+    <TargetFramework Condition="$(RevitVersion) &gt;= 2026">net10.0-windows</TargetFramework>
+    <TargetFramework Condition="$(RevitVersion) == 2025">net8.0-windows</TargetFramework>
+    <TargetFramework Condition="$(RevitVersion) &lt; 2025">net48</TargetFramework>
+
+    <AssemblyName>LiveClash</AssemblyName>
+    <RootNamespace>LiveClash</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <UseWPF>true</UseWPF>
+    <PlatformTarget>x64</PlatformTarget>
+    <Platforms>x64</Platforms>
+    <Configurations>Debug;Release</Configurations>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+
+    <!-- One folder per Revit version, for both the output and the intermediates.
+         The .addin manifests point straight at bin\Debug<version>, so building IS
+         deploying. Sharing bin\Debug across versions meant the version folders were
+         only ever as fresh as the last hand-copy, and a build could report success
+         while the loaded DLL stayed stale. Worse, the three targets are different
+         runtimes (net48, net8, net10) so a shared folder can put a .NET 10
+         assembly where Revit 2024 will try to load it. -->
+    <OutputPath>bin\$(Configuration)$(RevitVersion)\</OutputPath>
+    <IntermediateOutputPath>obj\$(Configuration)$(RevitVersion)\</IntermediateOutputPath>
+    <EnableDefaultNoneItems>false</EnableDefaultNoneItems>
+  </PropertyGroup>
+
+  <!-- Version constants so one source tree compiles against several Revit APIs -->
+  <PropertyGroup>
+    <DefineConstants>$(DefineConstants);REVIT$(RevitVersion)</DefineConstants>
+    <DefineConstants Condition="$(RevitVersion) &gt;= 2024">$(DefineConstants);R24_PLUS</DefineConstants>
+  </PropertyGroup>
+
+  <!-- Testing\ holds the checks the headless test project (tests\) links in on its own;
+       they are never part of the add-in. -->
+  <ItemGroup>
+    <Compile Remove="Testing\**\*.cs" />
+  </ItemGroup>
+
+  <!--
+    Where the Revit API assemblies come from:
+        Installed (default) - reference the DLLs in a local Revit install via HintPath.
+                              This is what a build-is-deploy dev machine wants.
+        NuGet               - reference the Nice3point packaged reference assemblies,
+                              so the project COMPILES on a machine with NO Revit
+                              installed. This is the CI compile gate:
+                                  dotnet build -p:RevitVersion=2026 -p:RevitApiSource=NuGet
+                              The packages are reference-only (no runtime bodies), so
+                              this proves it builds; it cannot run the in-Revit tests.
+  -->
+  <PropertyGroup>
+    <RevitApiSource Condition="'$(RevitApiSource)' == ''">Installed</RevitApiSource>
+    <RevitInstallDir Condition="'$(RevitInstallDir)' == ''">C:\Program Files\Autodesk\Revit $(RevitVersion)\</RevitInstallDir>
+  </PropertyGroup>
+
+  <!-- Installed: HintPath to the local Revit. Private=false so the Revit API DLLs
+       are never copied next to the add-in. -->
+  <ItemGroup Condition="'$(RevitApiSource)' == 'Installed'">
+    <Reference Include="RevitAPI">
+      <HintPath>$(RevitInstallDir)RevitAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="RevitAPIUI">
+      <HintPath>$(RevitInstallDir)RevitAPIUI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- NuGet: no Revit install needed. PrivateAssets=all so nothing is copied out. -->
+  <ItemGroup Condition="'$(RevitApiSource)' == 'NuGet'">
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="$(RevitVersion).*" PrivateAssets="all" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="$(RevitVersion).*" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="LiveClash.addin" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- The headless CI test project lives under tests\ and links a few Core files in
+       on its own. Keep the add-in build from globbing that folder as its own source. -->
+  <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Ribbon icons, embedded so there are no loose files to deploy. -->
+    <EmbeddedResource Include="Resources/clash32.png" />
+    <EmbeddedResource Include="Resources/clash16.png" />
+    <EmbeddedResource Include="Resources/pause32.png" />
+    <EmbeddedResource Include="Resources/pause16.png" />
+    <EmbeddedResource Include="Resources/clearance32.png" />
+    <EmbeddedResource Include="Resources/clearance16.png" />
+  </ItemGroup>
+
+</Project>

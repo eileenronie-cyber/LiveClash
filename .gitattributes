@@ -1,0 +1,20 @@
+# Line endings. Every commit in this repo has warned "LF will be replaced by CRLF"
+# because the policy was implicit; this makes it explicit before the first push,
+# when it costs nothing.
+#
+# Text is stored LF in the repo and checked out CRLF on Windows, which is the git
+# default for a Windows-only project. Existing blobs are left alone — run
+# `git add --renormalize .` if you ever want the history's line endings unified too.
+* text=auto
+
+# PowerShell must be CRLF on disk. Some Windows PowerShell hosts mis-parse a
+# script with bare LF endings, and dev\revit.ps1 is the script that drives Revit.
+*.ps1 text eol=crlf
+
+# Binary, never diffed or line-ending mangled.
+*.png binary
+*.rvt binary
+*.bundle binary
+
+# Git hooks are run by sh and break on CRLF, so they are LF on disk regardless of platform.
+ci/hooks/* text eol=lf
