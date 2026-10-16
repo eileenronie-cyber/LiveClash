@@ -7,7 +7,7 @@ namespace LiveClash.Testing
     /// <summary>
     /// The filter's serialization and legacy-to-rules migration checks, kept in one
     /// place so they run in TWO contexts from a SINGLE copy of the assertions:
-    ///   - inside Revit, via <see cref="SelfTest"/> over the dev bridge, and
+    ///   - inside Revit, by the in-Revit checks (not part of this repository), and
     ///   - headless in CI, via the LiveClash.LogicTests console runner.
     ///
     /// Everything here is Revit-FREE at runtime: it only constructs the filter's own
@@ -207,7 +207,7 @@ namespace LiveClash.Testing
         /// ClashSettings writes them as top-level auditdrop= lines and the engine applies
         /// them to every set, so the LINE format is the one persistence unit that is
         /// Revit-free and can be gated headless. The per-set -> global migration itself
-        /// touches BuiltInCategory, so it is verified in Revit over the bridge, not here.
+        /// touches BuiltInCategory, so it is verified inside Revit, not here.
         /// </summary>
         public static void AuditDropFormat(Action<string, bool?> check)
         {

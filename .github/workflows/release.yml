@@ -1,0 +1,63 @@
+# Live Clash release.
+#
+# Push a version tag (git tag v1.2.0 && git push origin v1.2.0) and this runs the
+# CI gate, builds LiveClash.dll for each Revit version against the Nice3point
+# reference assemblies, zips it with its .addin manifest, and publishes the zips
+# as a GitHub Release for that tag.
+
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET SDKs
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Run CI gate (compile x3 Release + 1 Debug + headless logic tests)
+        shell: pwsh
+        run: ./ci/gate.ps1
+
+      - name: Package for Revit 2024, 2025 and 2026
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          New-Item -ItemType Directory release -Force | Out-Null
+          foreach ($v in 2024, 2025, 2026) {
+            dotnet build LiveClash.csproj -c Release -p:RevitVersion=$v -p:RevitApiSource=NuGet -v m --nologo
+            if ($LASTEXITCODE -ne 0) { throw "build failed for $v" }
+            $stage = "stage/LiveClash-Revit$v"
+            New-Item -ItemType Directory $stage -Force | Out-Null
+            Copy-Item "bin/Release$v/LiveClash.dll", "LiveClash.addin" $stage
+            Compress-Archive -Path "$stage/*" -DestinationPath "release/LiveClash-Revit$v-$tag.zip"
+          }
+          Get-ChildItem release
+
+      - name: Publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $notes = @"
+          One zip per Revit version - download the one for YOUR Revit.
+
+          Unzip it and copy ``LiveClash.dll`` and ``LiveClash.addin`` together into
+          ``%APPDATA%\Autodesk\Revit\Addins\<year>\``, then start Revit. A **Live Clash** tab appears.
+          "@
+          gh release create $tag (Get-ChildItem release/*.zip).FullName --title "Live Clash $tag" --notes $notes

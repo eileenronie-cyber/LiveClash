@@ -194,8 +194,8 @@ namespace LiveClash.Core
 
         /// <summary>
         /// Measure the scope of the full check <paramref name="settings"/> would run on
-        /// <paramref name="doc"/>. Revit-bound (reads collectors), so exercised over the
-        /// dev bridge rather than in the headless gate.
+        /// <paramref name="doc"/>. Revit-bound (reads collectors), so exercised by the
+        /// in-Revit checks rather than in the headless gate.
         /// </summary>
         public static ClashScopeEstimate Measure(Document doc, ClashSettings settings)
         {

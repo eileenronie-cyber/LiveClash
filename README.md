@@ -142,6 +142,10 @@ UI/
 
 ## Build & install
 
+**Just want to use it?** Download the zip for your Revit version from [Releases](../../releases), unzip it, and copy `LiveClash.dll` and `LiveClash.addin` together into `%APPDATA%\Autodesk\Revit\Addins\<year>\`. Start Revit, and a **Live Clash** tab appears.
+
+To build it yourself:
+
 ```powershell
 dotnet build -p:RevitVersion=2026 -c Release
 # or 2025, 2024 — the csproj picks the runtime automatically:
@@ -193,7 +197,7 @@ The whole gate (compile every runtime from NuGet reference assemblies, then the 
 .\ci\gate.ps1
 ```
 
-It builds `net48 / net8 / net10` (Revit 2024 / 2025 / 2026) against the Nice3point packaged reference assemblies via `-p:RevitApiSource=NuGet`, so **no Revit install is needed** — that's what catches a refactor breaking one target while another still compiles. `.github/workflows/ci.yml` runs the same script on `windows-latest` (it runs on every push and pull request).
+It builds `net48 / net8 / net10` (Revit 2024 / 2025 / 2026) against the Nice3point packaged reference assemblies via `-p:RevitApiSource=NuGet`, so **no Revit install is needed** — that's what catches a refactor breaking one target while another still compiles. `.github/workflows/ci.yml` runs the same script on `windows-latest` (it runs on every push and pull request). Pushing a `v*` tag runs `.github/workflows/release.yml`, which runs the gate, builds each Revit version and publishes the zips as a release.
 
 **In-Revit checks.** Geometry verification (`BooleanOperationsUtils`, `Solid`), `ClashResult.MakeKey`, the `TargetIndex` grid, `PairSuppressor` and the sweep's de-duplication can't run headless, because those types only exist inside Revit's process. They are checked inside Revit against real models and against a fixture generated from Revit's own templates on 2024, 2025 and 2026. That harness isn't part of this repository. The serialization and migration assertions it shares with the headless runner (`Testing/FilterLogicChecks.cs` and the other files in `Testing/`) are.
 

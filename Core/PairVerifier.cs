@@ -597,9 +597,9 @@ namespace LiveClash.Core
         /// the same thing every pair inherited before per-set overrides existed.
         /// </summary>
         /// <remarks>
-        /// Internal rather than private so SelfTest can call the real method — the same
+        /// Internal rather than private so the in-Revit checks can call the real method — the same
         /// reason <see cref="ClashEngine.ReverseWillCoverIt"/> and
-        /// <see cref="ClashVerify.Intersects"/> are internal, not a copy SelfTest builds
+        /// <see cref="ClashVerify.Intersects"/> are internal, not a copy the checks build
         /// its own version of.
         /// </remarks>
         internal static double MaxClearanceForPair(

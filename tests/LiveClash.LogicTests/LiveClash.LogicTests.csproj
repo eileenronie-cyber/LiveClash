@@ -5,7 +5,7 @@
     legacy->rules migration. Runs on a build machine with NO Revit installed, because
     it references the Nice3point reference assemblies (metadata only) and links in the
     handful of Core source files those checks need. The assertions themselves live once,
-    in ..\..\Testing\FilterLogicChecks.cs, shared with the in-Revit SelfTest.
+    in ..\..\Testing\FilterLogicChecks.cs, shared with the in-Revit checks.
 
         dotnet run  (from this project folder)
 
@@ -41,7 +41,7 @@
     <!-- The runner itself. -->
     <Compile Include="Program.cs" />
 
-    <!-- Shared assertions (single source of truth, also run by the in-Revit SelfTest).
+    <!-- Shared assertions (single source of truth, also run by the in-Revit checks).
          SharedChecks is the one list both tiers run; add a block there, not here. -->
     <Compile Include="..\..\Testing\SharedChecks.cs" Link="Shared\SharedChecks.cs" />
     <Compile Include="..\..\Testing\FilterLogicChecks.cs" Link="Shared\FilterLogicChecks.cs" />

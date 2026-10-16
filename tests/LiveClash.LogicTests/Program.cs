@@ -11,7 +11,7 @@ namespace LiveClash.LogicTests
     {
         private static int Main()
         {
-            // Three outcomes, matching SelfTest: null means the check could not run
+            // Three outcomes, matching the in-Revit checks: null means the check could not run
             // here, and a skip is never counted as a pass. None of the headless checks
             // skip today - they need no model - but the sink must agree with the shared
             // FilterLogicChecks signature, and a suite that later gains a skip must not
@@ -26,7 +26,7 @@ namespace LiveClash.LogicTests
 
             try
             {
-                // One list, shared with the in-Revit SelfTest — see SharedChecks.
+                // One list, shared with the in-Revit checks — see SharedChecks.
                 SharedChecks.RunAll(check);
             }
             catch (Exception ex)

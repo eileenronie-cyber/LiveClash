@@ -253,7 +253,7 @@ namespace LiveClash.Core
         /// One failing pair of solids does not abandon the element: the loop keeps
         /// going, because a later pair may still find real volume.
         /// </summary>
-        // internal, not private, so the SelfTest harness can call the real method
+        // internal, not private, so the in-Revit checks can call the real method
         internal static bool? Intersects(List<Solid> sa, List<Solid> sb)
         {
             if (sa == null || sb == null || sa.Count == 0 || sb.Count == 0) return null;

@@ -6,8 +6,8 @@ namespace LiveClash.Testing
     /// Every Revit-free assertion, in one list.
     ///
     /// THE ONE LIST, and that is the whole job. Both tiers run these — the headless CI
-    /// gate on a machine with no Revit, and the in-Revit SelfTest — and each used to name
-    /// the blocks itself. They drifted: SelfTest never ran AuditDropFormat at all, so a
+    /// gate on a machine with no Revit, and the in-Revit checks — and each used to name
+    /// the blocks itself. They drifted: the in-Revit run never had AuditDropFormat, so a
     /// check could pass in CI and be flatly absent in Revit with nothing in either total
     /// to say so. Same failure as the filter keys having two readers, one level up.
     ///

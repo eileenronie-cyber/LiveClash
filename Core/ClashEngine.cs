@@ -89,7 +89,7 @@ namespace LiveClash.Core
         /// nests today; the counter is what stops that being a latent trap for whoever
         /// adds the first nesting caller.
         ///
-        /// Internal so the SelfTest harness can exercise <see cref="ReverseWillCoverIt"/>
+        /// Internal so the in-Revit checks can exercise <see cref="ReverseWillCoverIt"/>
         /// under its real condition: it returns false outright when sweep mode is off, so
         /// a test that did not set it would pass while asserting nothing.
         /// </summary>
@@ -118,7 +118,7 @@ namespace LiveClash.Core
         /// those too, or the pair would be dropped by both directions and vanish.
         /// </summary>
         /// <remarks>
-        /// Internal rather than private so SelfTest can call the real method, the same
+        /// Internal rather than private so the in-Revit checks can call the real method, the same
         /// reason ClashVerify.Intersects is internal. This decides whether a pair is
         /// evaluated once or twice, and everything downstream de-duplicates on the
         /// assumption that it is right.

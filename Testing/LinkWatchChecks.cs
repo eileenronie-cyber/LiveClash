@@ -20,7 +20,7 @@ namespace LiveClash.Testing
     ///
     /// What is NOT here: <c>Observe</c> against real Revit ids, and above all the
     /// unload-vs-load-echo discrimination. That needs a real RevitLinkType, so it lives
-    /// in SelfTest.LinkWatchLive.
+    /// in the in-Revit checks.
     /// </summary>
     public static class LinkWatchChecks
     {
