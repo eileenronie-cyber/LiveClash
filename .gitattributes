@@ -8,7 +8,7 @@
 * text=auto
 
 # PowerShell must be CRLF on disk. Some Windows PowerShell hosts mis-parse a
-# script with bare LF endings, and dev\revit.ps1 is the script that drives Revit.
+# script with bare LF endings.
 *.ps1 text eol=crlf
 
 # Binary, never diffed or line-ending mangled.
