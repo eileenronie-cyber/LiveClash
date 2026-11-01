@@ -305,10 +305,12 @@ namespace LiveClash.Core
                 if (g.Value >= ge.WhenUtc) { ge.Gone = true; ge.GoneUtc = g.Value; }
             }
 
-            // A decision of New is the absence of a decision — drop it so the set holds
-            // only real ones.
+            // A decision of New WITH NO NOTE is the absence of a decision — drop it so the set holds
+            // only real ones. New with a note is kept: it is what ClashStatusStore.Set holds in memory,
+            // and the panel said "Note saved". Dropping every New here lost that note on the next load
+            // (review 2026-10-31, M5: the half of 2026-09-27 R06 that was fixed in memory only).
             var doomed = new List<string>();
-            foreach (var kv in byKey) if (kv.Value.Kind == ClashStatusKind.New) doomed.Add(kv.Key);
+            foreach (var kv in byKey) if (kv.Value.Kind == ClashStatusKind.New && string.IsNullOrEmpty(kv.Value.Note)) doomed.Add(kv.Key);
             foreach (var d in doomed) byKey.Remove(d);
         }
     }

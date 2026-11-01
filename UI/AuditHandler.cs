@@ -22,12 +22,13 @@ namespace LiveClash.UI
             try
             {
                 var uidoc = app.ActiveUIDocument;
-                var doc = uidoc != null ? uidoc.Document : null;
+                var doc = HandlerGuard.Pick(uidoc);
                 if (doc == null || !doc.IsValidObject)
                 {
                     if (Panel != null) Panel.SetStatus("Audit needs an open model.");
                     return;
                 }
+                if (HandlerGuard.Refuses(doc, Panel, "run the audit")) return;
 
                 AuditLabelStore.Instance.LoadFor(doc);
 
@@ -94,20 +95,37 @@ namespace LiveClash.UI
         {
             var s = ClashSettings.Current;
 
+            int before = s.AuditDrops.Count;
             int added = ApplyTo(s.AuditDrops, names, remove);
+            int removed = before + added - s.AuditDrops.Count;
 
-            s.Save();
+            // Nothing changed: the results are still right for this drop list, so keep them.
+            // Clearing them here sent the user off to run a full check for no reason.
+            if (added == 0 && removed == 0)
+            {
+                if (Panel != null)
+                    Panel.SetStatus("Audit: no change — the drop list already matches what is ticked ("
+                        + s.AuditDrops.Count + " family+type pair(s) dropped).");
+                return;
+            }
+
+            bool saved = s.Save();
+            var notSaved = SaveNotice.After(saved, s.IsSuperseded);   // DL-e: a refused save is said, not hidden
+            if (notSaved != null && s.IsSuperseded)
+            {
+                if (Panel != null) Panel.SetStatus(notSaved);   // the drops went into a discarded object: nothing was applied
+                return;
+            }
             ClashEngine.InvalidateAll();
             ClashUpdater.AddTriggers();
-            ClashResultStore.Instance.Clear();
+            LiveClashApp.ClearResultsForNewRules();   // the list and the held link rows (delta review 3, D3-2)
             if (Panel != null) Panel.SetEmptyReason(ClashPanel.EmptyReason.DropsChanged);
 
-            int removed = remove == null ? 0 : remove.Count;
             Log.Info("Audit: +" + added + " / -" + removed + " family+type(s), global; "
                      + s.AuditDrops.Count + " pair(s) now dropped across every set.");
 
             if (Panel != null)
-                Panel.SetStatus("Audit drop list updated (+" + added + " / -" + removed
+                Panel.SetStatus((notSaved == null ? "" : notSaved + " ") + "Audit drop list updated (+" + added + " / -" + removed
                     + "). " + s.AuditDrops.Count + " family+type pair(s) dropped in every set, "
                     + "both sides. Run a full check to re-evaluate.");
         }

@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using Autodesk.Revit.DB;
 using System.Diagnostics;
 using Autodesk.Revit.UI;
@@ -31,7 +32,9 @@ namespace LiveClash.UI
             var uidoc = app.ActiveUIDocument;
             if (uidoc == null) return;
 
-            var doc = uidoc.Document;
+            var doc = HandlerGuard.Pick(uidoc);
+            if (HandlerGuard.Refuses(doc, Panel, "run a full check")) return;
+            if (HandlerGuard.SettingsReloaded()) return;   // the rules changed under the listed rows: reset first, record nothing (DC-1)
 
             // THREE CLOCKS, not one, and the split is the whole point.
             //
@@ -115,53 +118,70 @@ namespace LiveClash.UI
                 // something to swap in (below), so a sweep that fails part-way leaves the previous results
                 // listed instead of a blank panel and nothing to go back to.
                 long lastLogMs = 0;
-                var results = ClashEngine.RunFullCheckAllSets(doc, ClashSettings.Current, (done, total) =>
+                // A host or link whose targets cannot be collected is left out of the sweep: said in the summary, not read as clean (LOW-12).
+                CollectionFailures.Begin();
+                List<string> notCollected;
+                List<ClashResult> results;
+                try
                 {
-                    // One line per batch would flood a big model; one per second is
-                    // enough to prove liveness and to measure the rate.
-                    //
-                    // THE SWEEP CLOCK, not the total. Dividing wall-clock-since-entry
-                    // by elements checked charges the dialog's dwell time to the first
-                    // batch, which is what produced a 74-minute ETA on a 12-second job.
-                    long now = sweep.ElapsedMilliseconds;
+                    results = ClashEngine.RunFullCheckAllSets(doc, ClashSettings.Current, (done, total) =>
+                    {
+                        // One line per batch would flood a big model; one per second is
+                        // enough to prove liveness and to measure the rate.
+                        //
+                        // THE SWEEP CLOCK, not the total. Dividing wall-clock-since-entry
+                        // by elements checked charges the dialog's dwell time to the first
+                        // batch, which is what produced a 74-minute ETA on a 12-second job.
+                        long now = sweep.ElapsedMilliseconds;
 
-                    // The window BEFORE the log's once-a-second throttle (it throttles itself), and started
-                    // late if the estimate said this would be quick and it was not.
-                    if (progressUi == null && now > 2000 && done < total)
-                        progressUi = FullCheckProgress.Start(FullCheckProgress.RevitWindow());
-                    if (progressUi != null)
-                        progressUi.Report(done, total, now, done > 0 ? (long)((double)now / done * (total - done)) : -1);
+                        // The window BEFORE the log's once-a-second throttle (it throttles itself), and started
+                        // late if the estimate said this would be quick and it was not.
+                        if (progressUi == null && now > 2000 && done < total)
+                            progressUi = FullCheckProgress.Start(FullCheckProgress.RevitWindow());
+                        if (progressUi != null)
+                            progressUi.Report(done, total, now, done > 0 ? (long)((double)now / done * (total - done)) : -1);
 
-                    if (now - lastLogMs < 1000 && done < total) return;
-                    lastLogMs = now;
+                        if (now - lastLogMs < 1000 && done < total) return;
+                        lastLogMs = now;
 
-                    double perElement = done > 0 ? (double)now / done : 0.0;
-                    long remainingMs = (long)(perElement * (total - done));
+                        double perElement = done > 0 ? (double)now / done : 0.0;
+                        long remainingMs = (long)(perElement * (total - done));
 
-                    Log.Info("Full check: " + done + "/" + total
-                             + " (" + (total > 0 ? done * 100 / total : 0) + "%)"
-                             + "  " + now + " ms elapsed"
-                             + ", " + perElement.ToString("0.0") + " ms/element"
-                             + ", ~" + (remainingMs / 1000) + " s remaining.");
-                });
+                        Log.Info("Full check: " + done + "/" + total
+                                 + " (" + (total > 0 ? done * 100 / total : 0) + "%)"
+                                 + "  " + now + " ms elapsed"
+                                 + ", " + perElement.ToString("0.0") + " ms/element"
+                                 + ", ~" + (remainingMs / 1000) + " s remaining.");
+                    });
+                }
+                finally { notCollected = CollectionFailures.End(); }
 
                 ClashResultStore.Instance.Replace(results);
                 replaced = true;
                 sweep.Stop();
+
+                // Report what LANDED, not what was produced. The engine returns a
+                // result per direction, so a pair found both ways (A hits B and B
+                // hits A) is two results and one row — 196 vs 193 on this model.
+                // Logging the raw count made the panel look like it had lost rows.
+                // Counted before any unmeasured pair is put back below, which the
+                // summary names separately.
+                int stored = ClashResultStore.Instance.Count;
 
                 // Timed on its own: it re-verifies every pair that dropped out, which
                 // is real work but is not the sweep, and folding it in would make two
                 // runs over the same model look different for a reason nobody could see.
                 if (progressUi != null) progressUi.SetStage("Checking which of the clashes you had listed have been fixed…");
                 var resolving = Stopwatch.StartNew();
-                RecordResolved(doc, before);
+                var unreported = RecordResolved(doc, before);
                 resolving.Stop();
 
-                // Report what LANDED, not what was produced. The engine returns a
-                // result per direction, so a pair found both ways (A hits B and B
-                // hits A) is two results and one row — 196 vs 193 on this model.
-                // Logging the raw count made the panel look like it had lost rows.
-                int stored = ClashResultStore.Instance.Count;
+                // Listed pairs nobody could re-test (most often a link not loaded) go back on the
+                // list as Unverified, as Recheck keeps them: dropping them was silent under-reporting
+                // (review 2026-10-31, M2). Before "what changed" below, which must see them too.
+                if (unreported != null && unreported.Unmeasured.Count > 0)
+                    ClashResultStore.Instance.AddRange(unreported.Unmeasured);
+                if (unreported != null) DroppedLinkRows.HoldFor(doc, unreported.Removed);   // an undo of the deletion lists them again (DM3)
 
                 // A full check re-sweeps everything a link change could have affected, so
                 // whatever the notice was reporting is now reflected in the fresh results
@@ -175,12 +195,14 @@ namespace LiveClash.UI
                 LinkWatch.Clear();
                 if (Panel != null) Panel.RefreshLinkNotice();
 
-                if (Panel != null) Panel.SetEmptyReason(ClashPanel.EmptyReason.CheckedAndClean);
+                if (Panel != null) Panel.SetEmptyReason(CheckOutcome.HasGaps(notCollected) ? ClashPanel.EmptyReason.CheckedWithGaps : ClashPanel.EmptyReason.CheckedAndClean);
                 var msg = "Full check: " + stored + " clash(es) in " + sweep.ElapsedMilliseconds + " ms"
                         + (results.Count != stored
                             ? "  (" + (results.Count - stored) + " duplicate pair(s) collapsed)"
                             : "")
-                        + ".";
+                        + "."
+                        + (unreported != null ? unreported.Note() : "")
+                        + CheckOutcome.NotCollectedNote(notCollected);
 
                 // The panel gets the sweep figure alone — that is the number someone
                 // compares against last time. The breakdown goes to the log, where the
@@ -223,56 +245,66 @@ namespace LiveClash.UI
         /// the narrow question "do these two still overlap?" independently of any filter:
         ///   Resolved      -> really fixed, record it
         ///   StillClashing -> only out of scope now, say nothing
-        ///   Unknown       -> usually an unloaded link; never claim a fix we cannot see
+        ///   Unknown       -> usually an unloaded link; never claim a fix we cannot see,
+        ///                    and keep it listed (returned in Unmeasured, as Unverified)
+        ///   link instance removed from the model -> dropped, not recorded, and said so (returned in Removed)
         /// </summary>
-        private static void RecordResolved(Document doc, IList<ClashResult> before)
+        private static UnreportedPairs RecordResolved(Document doc, IList<ClashResult> before)
         {
-            if (doc == null || before == null || before.Count == 0) return;
+            if (doc == null || before == null || before.Count == 0) return null;
+
+            // Sorted OUTSIDE the try below: a failure writing the ledgers must not cost the caller
+            // the pairs to keep. Sort itself does not throw for a pair (a failed re-test is Unknown).
+            Dictionary<long, LinkContext> links = null;
+            var sorted = UnreportedPairs.Sort(before, ClashResultStore.Instance.Snapshot(), r =>
+            {
+                if (links == null) links = PairVerifier.LinkLookup(doc);
+                ClashSeverity sev;
+                return PairVerifier.Verify(doc, r, ClashSettings.Current, links, out sev);
+            }, r => PairVerifier.LinkInstanceRemoved(doc, r));
+            if (sorted.Missing == 0) return sorted;
+
             try
             {
-                var still = new HashSet<string>();
-                foreach (var r in ClashResultStore.Instance.Snapshot())
-                    if (!string.IsNullOrEmpty(r.Key)) still.Add(r.Key);
-
-                var missing = new List<ClashResult>();
-                foreach (var r in before)
-                    if (!string.IsNullOrEmpty(r.Key) && !still.Contains(r.Key)) missing.Add(r);
-                if (missing.Count == 0) return;
-
-                var links = PairVerifier.LinkLookup(doc);
-                var fixedOnes = new List<ClashResult>();
-                var goneKeys = new List<string>();
-                int outOfScope = 0;
-
-                foreach (var r in missing)
+                // The settings were read again DURING this check (a retry landed on a read after the guard), so the pairs were listed under one set
+                // of rules and judged under another: a pair re-measured as clear under the new rules is not a fix, and a clearance-only pair would be
+                // recorded as fixed with nothing in the model changed (delta review 4, DR4-1). A pair whose element is GONE still is one, whatever the
+                // rules say (decision T-g; delta check of DR4, DC4-1). The idle tick resets the list.
+                var toRecord = sorted.Fixed;
+                int notRecorded = 0;
+                if (sorted.Fixed.Count > 0 && ClashSettings.RulesReloadPending)
                 {
-                    ClashSeverity sev;
-                    var verdict = PairVerifier.Verify(doc, r, ClashSettings.Current, links, out sev);
-                    if (verdict == PairVerifier.Verdict.Resolved)
-                    {
-                        fixedOnes.Add(r);
-                        goneKeys.Add(r.Key);
-                    }
-                    else if (verdict == PairVerifier.Verdict.StillClashing) outOfScope++;
+                    toRecord = sorted.Fixed.Where(r => PairVerifier.ElementGone(doc, r)).ToList();
+                    notRecorded = sorted.Fixed.Count - toRecord.Count;
+                    if (notRecorded > 0)
+                        Log.Info("Full check: the settings were read again during the check; " + notRecorded
+                                 + " pair(s) no longer reported are NOT recorded as fixed (re-measured under rules that changed).");
                 }
 
-                if (goneKeys.Count > 0)
+                if (toRecord.Count > 0)
                 {
+                    var goneKeys = new List<string>();
+                    foreach (var r in toRecord) goneKeys.Add(r.Key);
+
                     // Against the decision first, so a pair that was accepted and has now
                     // been fixed shows as Reopened if it ever comes back.
                     ClashStatusStore.Instance.NoteGone(goneKeys);
-                    ResolvedLog.Add(fixedOnes);
+                    ResolvedLog.Add(toRecord);
                 }
 
-                Log.Info("Full check: " + missing.Count + " listed pair(s) no longer reported — "
-                         + goneKeys.Count + " verified fixed and recorded"
-                         + (outOfScope > 0 ? ", " + outOfScope + " still clashing but out of the current scope" : "")
+                Log.Info("Full check: " + sorted.Missing + " listed pair(s) no longer reported — "
+                         + toRecord.Count + " verified fixed and recorded"
+                         + (notRecorded > 0 ? ", " + notRecorded + " found clear but NOT recorded (the rules changed during the check)" : "")
+                         + (sorted.OutOfScope > 0 ? ", " + sorted.OutOfScope + " still clashing but out of the current scope" : "")
+                         + (sorted.Unmeasured.Count > 0 ? ", " + sorted.Unmeasured.Count + " could not be checked and stay listed as Unverified" : "")
+                         + (sorted.Removed.Count > 0 ? ", " + sorted.Removed.Count + " dropped because their link was removed" : "")
                          + ".");
             }
             catch (System.Exception ex)
             {
                 Log.Warn("Full check: could not record resolved pairs", ex);
             }
+            return sorted;
         }
 
         /// <summary>

@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using System.Diagnostics;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
@@ -32,8 +33,10 @@ namespace LiveClash.UI
             var uidoc = app.ActiveUIDocument;
             if (uidoc == null) return;
 
-            var doc = uidoc.Document;
+            var doc = HandlerGuard.Pick(uidoc);
             if (doc == null || !doc.IsValidObject) return;
+            if (HandlerGuard.Refuses(doc, Panel, "recheck")) return;
+            if (HandlerGuard.SettingsReloaded()) return;   // the rules changed under the listed rows: reset first, record nothing (DC-1)
 
             var sw = Stopwatch.StartNew();
             try
@@ -60,12 +63,14 @@ namespace LiveClash.UI
                         ids.Add(r.OtherElementId);
                 }
 
-                int before = snapshot.Count;
+                int verifiedFixed = 0, keptUnchecked = 0, removedLinks = 0;
+                var droppedLinkRows = new List<ClashResult>();
 
                 // Keys we knew about, so the ones that do not come back can be
                 // recorded as gone against any decision they carry.
                 var known = new HashSet<string>();
                 foreach (var r in snapshot) if (!string.IsNullOrEmpty(r.Key)) known.Add(r.Key);
+                var listedBefore = new HashSet<string>(known);
 
                 // Forget what we knew about these elements, then ask again.
                 foreach (var id in ids) ClashResultStore.Instance.RemoveForElement(id);
@@ -75,8 +80,17 @@ namespace LiveClash.UI
                 // Re-check against EVERY enabled set, the same way the live path and the
                 // full check do — a row caught by any set must be re-evaluated by that set.
                 List<ElementId> notChecked;
-                var results = ClashEngine.CheckElementsAllSets(
-                    doc, ids, ClashSettings.Current, null, out notChecked);
+                List<string> notCollected;
+                CollectionFailures.Begin();   // a host or link whose targets cannot be collected is said, not read as clean (LOW-12)
+                List<ClashResult> results;
+                try
+                {
+                    results = ClashEngine.CheckElementsAllSets(
+                        doc, ids, ClashSettings.Current, null, out notChecked);
+                }
+                finally { notCollected = CollectionFailures.End(); }
+                // The contexts the recheck just built are cached; what they could not read is part of what this recheck did not check (L-2).
+                notCollected = CollectionFailures.Union(new IList<string>[] { notCollected, ClashContext.UnreadNow() });
                 ClashResultStore.Instance.AddRange(results);
 
                 // Anything that was listed before and is not listed now MIGHT be resolved - but
@@ -114,17 +128,50 @@ namespace LiveClash.UI
                             confirmedGone.Add(r.Key);
                             fixedOnes.Add(r);
                         }
+                        else if (PairVerifier.DropsRow(verdict, () => PairVerifier.LinkInstanceRemoved(doc, r)))
+                        {
+                            // Unknown for good: the link instance was removed from the model, so this pair can never
+                            // be re-tested and would stay listed for ever (delta review 2026-10-31, DN1). Not
+                            // recorded as fixed: nothing was measured. Said on the panel.
+                            removedLinks++;
+                            droppedLinkRows.Add(r);
+                        }
                         else
                         {
                             // StillClashing, or Unknown (most often its link is not loaded right
                             // now): the coarse re-check above dropped it wrongly. Put it back
                             // rather than losing a real, unresolved coordination issue.
-                            if (verdict == PairVerifier.Verdict.StillClashing) r.Severity = sev;
-                            restore.Add(r);
+                            //
+                            // An unknown pair goes back at Unverified, as the full check keeps it (delta review
+                            // 2026-10-31, DL1): it no longer claims a severity nobody measured, and "What changed"
+                            // can tell it was not checked instead of reading "no change".
+                            var back = verdict == PairVerifier.Verdict.Unknown ? r.Clone() : r;
+                            back.Severity = CheckOutcome.RestoredSeverity(verdict, r.Severity, sev);
+                            if (verdict == PairVerifier.Verdict.Unknown) keptUnchecked++;
+                            restore.Add(back);
                         }
                     }
 
                     if (restore.Count > 0) ClashResultStore.Instance.AddRange(restore);
+                    ClashResultStore.Instance.ForgetResolved(droppedLinkRows.Select(r => r.Key));   // dropped, not fixed: never shown as just fixed (SP5)
+                    DroppedLinkRows.HoldFor(doc, droppedLinkRows);   // an undo of the deletion lists them again (DM3)
+
+                    // The settings were read again during this recheck (a retry landed on a read after the guard): the rows were listed under one set
+                    // of rules and re-tested under another, so none of them is a measured fix and nothing is recorded (delta review 4, DR4-1). The
+                    // idle tick resets the list.
+                    // A pair whose element is GONE is still a fix whatever the rules say (decision T-g; delta check of DR4, DC4-1): only the
+                    // re-measured ones are dropped.
+                    if (ClashSettings.RulesReloadPending && fixedOnes.Count > 0)
+                    {
+                        var deleted = fixedOnes.Where(r => PairVerifier.ElementGone(doc, r)).ToList();
+                        int notRecorded = fixedOnes.Count - deleted.Count;
+                        if (notRecorded > 0)
+                            Log.Info("Recheck: the settings were read again during the recheck; " + notRecorded
+                                     + " pair(s) no longer reported are NOT recorded as fixed (re-measured under rules that changed).");
+                        fixedOnes = deleted;
+                        confirmedGone = deleted.Select(r => r.Key).ToList();
+                    }
+                    verifiedFixed = confirmedGone.Count;
 
                     if (confirmedGone.Count > 0)
                     {
@@ -137,12 +184,13 @@ namespace LiveClash.UI
                 }
 
                 sw.Stop();
-                int after = ClashResultStore.Instance.Count;
-                int gone = before - after;
+                var listedAfter = ClashResultStore.Instance.Snapshot();
+                int after = listedAfter.Count;
+                int newPairs = 0;
+                foreach (var r in listedAfter)
+                    if (!string.IsNullOrEmpty(r.Key) && !listedBefore.Contains(r.Key)) newPairs++;
 
-                var msg = "Rechecked " + ids.Count + " element(s) in " + sw.ElapsedMilliseconds + " ms — "
-                        + (gone > 0 ? gone + " resolved, " : "")
-                        + after + " clash(es) still live.";
+                var msg = CheckOutcome.RecheckMessage(ids.Count, sw.ElapsedMilliseconds, after, verifiedFixed, newPairs, keptUnchecked, removedLinks, notCollected);
                 Log.Info(msg);
 
                 // If a link changed and a check is awaited, say what this recheck found (provisionally: it re-tests only

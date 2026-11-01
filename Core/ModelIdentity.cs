@@ -134,14 +134,9 @@ namespace LiveClash.Core
         /// </summary>
         public static void Claim(string path, string identity)
         {
-            var line = Line(identity) + Environment.NewLine;
-            for (int attempt = 0; attempt < 5; attempt++)
-            {
-                try { File.AppendAllText(path, line); return; }
-                catch (IOException) { System.Threading.Thread.Sleep(20 * (attempt + 1)); }
-                catch (Exception ex) { Log.Warn("Could not claim " + path + " for this model", ex); return; }
-            }
-            Log.Warn("Could not claim " + path + " for this model: file stayed locked", null);
+            // Through LedgerFile.Append: retried, and on a line of its own after a half-written last
+            // line (review 2026-10-31, LOW-3), so the claim is never glued to a broken record.
+            LedgerFile.Append(path, null, Line(identity) + Environment.NewLine, "Could not claim " + path + " for this model");
         }
 
         /// <summary>

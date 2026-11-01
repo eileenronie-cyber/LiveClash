@@ -22,23 +22,10 @@ namespace LiveClash.Core
     /// clash — that stays the updater's job — so the two are complementary rather
     /// than alternatives.
     /// </summary>
-    public static class PairVerifier
+    public static partial class PairVerifier
     {
-        public enum Verdict
-        {
-            /// <summary>Still a real clash. Severity may have changed.</summary>
-            StillClashing,
-
-            /// <summary>Gone — geometry moved, or an element was deleted.</summary>
-            Resolved,
-
-            /// <summary>
-            /// Could not be answered — most often a link that is no longer loaded.
-            /// Treated as "keep": dropping a clash because we cannot see its other
-            /// half would quietly lose real coordination issues.
-            /// </summary>
-            Unknown
-        }
+        // The Verdict enum and the Revit-free verdict rules are in PairVerifier.Verdicts.cs, so the
+        // headless gate can hold them to account.
 
         /// <summary>Categories already warned about failing GetInsulationIds during
         /// verification, so a category that fails once (this can run every idle pass,
@@ -60,6 +47,46 @@ namespace LiveClash.Core
             }
             catch (Exception ex) { Log.Warn("Link lookup failed", ex); }
             return map;
+        }
+
+        /// <summary>
+        /// Has the link INSTANCE of a listed link pair been removed from the model (Manage Links, Remove)?
+        /// <see cref="LinkLookup"/> lists only links that are loaded, so a removed link and an unloaded one both
+        /// read as "no link" there and Unknown here; what tells them apart is that the instance element is gone
+        /// for good, where an unloaded link's instance is still in the model (delta review 2026-10-31, DN1).
+        /// False for a host-only pair, and false when the lookup throws: not knowing is never "removed".
+        /// An instance that is not valid counts as removed, like a missing one: for a deleted id Revit does not
+        /// always hand back null (see LiveClashApp.StillValid), and a stale element still IS a RevitLinkInstance.
+        /// A removal can be undone (DM3): <see cref="DroppedLinkRows"/> holds the dropped pairs for that.
+        /// </summary>
+        internal static bool LinkInstanceRemoved(Document doc, ClashResult r)
+        {
+            if (doc == null || !doc.IsValidObject || r == null || r.LinkInstanceId == null) return false;
+            try
+            {
+                var instance = doc.GetElement(r.LinkInstanceId) as RevitLinkInstance;
+                return instance == null || !instance.IsValidObject;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// True when the pair's HOST element, or (for a pair in this document) its other element, no longer exists: the two places Verify answers
+        /// Resolved because something was DELETED. A deletion is a fix whatever the rules say (decision T-g), and a pair re-measured as clear is not.
+        /// A pair whose other element lives in a link is never "gone" here: the link's content can change under any rules.
+        /// </summary>
+        internal static bool ElementGone(Document doc, ClashResult r)
+        {
+            if (doc == null || !doc.IsValidObject || r == null) return false;
+            try
+            {
+                var host = doc.GetElement(r.HostElementId);
+                if (host == null || !host.IsValidObject) return true;
+                if (r.LinkInstanceId != null) return false;
+                var other = doc.GetElement(r.OtherElementId);
+                return other == null || !other.IsValidObject;
+            }
+            catch { return false; }
         }
 
         public static Verdict Verify(
@@ -254,7 +281,7 @@ namespace LiveClash.Core
                 // still hold, and if it does not, this pair genuinely is resolved.
             }
 
-            if (clearance > 0 && BoxesOverlap(a, null, b, null, clearance))
+            if (clearance > 0 && BoxesOverlap(a, b, null, clearance))
             {
                 severity = ClashSeverity.Clearance;
                 return Verdict.StillClashing;
@@ -377,6 +404,7 @@ namespace LiveClash.Core
             severity = ClashSeverity.Hard;
             bool hard = false;
             bool tested = false;
+            bool anyFailed = false;   // a solid that could not be moved into link space, or tested there
 
             // ExtractSolids, not GeometryUtil.GetSolids: Fine detail with a Medium
             // fallback. This used to call GetSolids(host) with the DEFAULT detail,
@@ -400,7 +428,7 @@ namespace LiveClash.Core
             {
                 Solid moved;
                 try { moved = SolidUtils.CreateTransformed(solid, link.ToLink); }
-                catch { continue; }
+                catch { anyFailed = true; continue; }
                 if (moved == null || moved.Volume <= 1e-9) continue;
                 hostInLink.Add(moved);
             }
@@ -415,7 +443,7 @@ namespace LiveClash.Core
                     tested = true;
                     if (hits.Count > 0) { hard = true; break; }
                 }
-                catch { /* try the next solid */ }
+                catch { anyFailed = true; /* try the next solid */ }
             }
 
             if (hard)
@@ -439,13 +467,14 @@ namespace LiveClash.Core
 
             // Clearance first: it works off bounding boxes, so it can still confirm a
             // clash even when no solid was testable.
-            if (clearance > 0 && BoxesOverlap(a, null, other, link.ToHost, clearance))
+            if (clearance > 0 && BoxesOverlap(a, other, link, clearance))
             {
                 severity = ClashSeverity.Clearance;
                 return Verdict.StillClashing;
             }
 
-            // NOTHING WAS ACTUALLY TESTED — say Unknown, never Resolved.
+            // NOTHING WAS ACTUALLY TESTED — say Unknown, never Resolved. (The rule is
+            // AfterSolidTests, in PairVerifier.Verdicts.cs.)
             //
             // This guard used to read `!tested && solids.Count > 0`, which let the
             // worst case straight through: no solids at all meant the loop never ran,
@@ -457,9 +486,7 @@ namespace LiveClash.Core
             //
             // Resolved is a claim that the clash is gone. It may only be returned by a
             // test that ran.
-            if (!tested) return Verdict.Unknown;
-
-            return Verdict.Resolved;
+            return AfterSolidTests(tested, anyFailed);
         }
 
         // ------------------------------------------------------ the insulation verify loop
@@ -693,12 +720,12 @@ namespace LiveClash.Core
         }
 
         /// <summary>
-        /// Bounding-box overlap in host coordinates, with the clearance applied to
-        /// the host side only — matching how the engine inflates its query box, so
-        /// verification agrees with detection rather than quietly disagreeing.
+        /// Bounding-box overlap of host element <paramref name="a"/> and <paramref name="b"/>, which is
+        /// in <paramref name="link"/> (null: in the host too), with the clearance applied to the host
+        /// side only — matching how the engine inflates its query box, so verification agrees with
+        /// detection rather than quietly disagreeing.
         /// </summary>
-        private static bool BoxesOverlap(
-            Element a, Transform aToHost, Element b, Transform bToHost, double inflate)
+        private static bool BoxesOverlap(Element a, Element b, LinkContext link, double inflate)
         {
             try
             {
@@ -706,13 +733,9 @@ namespace LiveClash.Core
                 var bb = b.get_BoundingBox(null);
                 if (ba == null || bb == null) return false;
 
-                var oa = GeometryUtil.TransformToOutline(ba, aToHost, inflate);
-                var ob = GeometryUtil.TransformToOutline(bb, bToHost, 0.0);
-
-                if (oa.MaximumPoint.X < ob.MinimumPoint.X || oa.MinimumPoint.X > ob.MaximumPoint.X) return false;
-                if (oa.MaximumPoint.Y < ob.MinimumPoint.Y || oa.MinimumPoint.Y > ob.MaximumPoint.Y) return false;
-                if (oa.MaximumPoint.Z < ob.MinimumPoint.Z || oa.MinimumPoint.Z > ob.MaximumPoint.Z) return false;
-                return true;
+                return link == null
+                    ? OutlinesOverlap(ba, null, bb, null, inflate)
+                    : LinkClearanceOverlap(ba, bb, link.ToLink, inflate);
             }
             catch (Exception ex)
             {
@@ -722,6 +745,37 @@ namespace LiveClash.Core
                 Log.Warn("Clearance re-check failed; keeping the clash pending re-verify", ex);
                 return true;
             }
+        }
+
+        /// <summary>
+        /// The clearance box test of a host box against a linked element's box (in link coordinates).
+        /// Internal so the in-Revit checks can hold it to the same answer as detection.
+        /// </summary>
+        /// <remarks>
+        /// IN LINK SPACE, as detection does it (ClashEngine.CheckAgainstLink queries the link's index with
+        /// the host box moved into link space and inflated). It used to move the linked box into host space
+        /// instead. On a rotated link the two refitted boxes differ, so the verifier could call a pair
+        /// fixed that detection lists as Clearance - a false fix, re-listed on the next sweep (review
+        /// 2026-10-31, LOW-5).
+        /// </remarks>
+        internal static bool LinkClearanceOverlap(
+            BoundingBoxXYZ hostBox, BoundingBoxXYZ linkBox, Transform toLink, double inflate)
+        {
+            return OutlinesOverlap(hostBox, toLink, linkBox, null, inflate);
+        }
+
+        /// <summary>Do <paramref name="ba"/> (moved by <paramref name="aTo"/>, inflated) and
+        /// <paramref name="bb"/> (moved by <paramref name="bTo"/>) overlap, as axis-aligned outlines?</summary>
+        internal static bool OutlinesOverlap(
+            BoundingBoxXYZ ba, Transform aTo, BoundingBoxXYZ bb, Transform bTo, double inflate)
+        {
+            var oa = GeometryUtil.TransformToOutline(ba, aTo, inflate);
+            var ob = GeometryUtil.TransformToOutline(bb, bTo, 0.0);
+
+            if (oa.MaximumPoint.X < ob.MinimumPoint.X || oa.MinimumPoint.X > ob.MaximumPoint.X) return false;
+            if (oa.MaximumPoint.Y < ob.MinimumPoint.Y || oa.MinimumPoint.Y > ob.MaximumPoint.Y) return false;
+            if (oa.MaximumPoint.Z < ob.MinimumPoint.Z || oa.MinimumPoint.Z > ob.MaximumPoint.Z) return false;
+            return true;
         }
     }
 }

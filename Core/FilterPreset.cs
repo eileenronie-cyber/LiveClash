@@ -22,7 +22,6 @@ namespace LiveClash.Core
     public static class FilterPreset
     {
         public const string Extension = ".lcfilter";
-        private const string Magic = "# LiveClash filter preset v1";
 
         /// <summary>Whole-tool keys a preset carries — everything ELSE (budget, slice sizes,
         /// grouping, the live on/off switch) is how this machine likes to work, not part of a
@@ -65,7 +64,11 @@ namespace LiveClash.Core
             if (string.IsNullOrEmpty(path) || s == null) return;
 
             var lines = new List<string>();
-            lines.Add(Magic);
+            // The header is v1 (every build opens it) unless a value in the filter would be cut by a build that predates
+            // round 2 of the 2026-10-31 review (a "|", a line break): then it is a header those builds refuse, with the
+            // message "not a Live Clash filter preset", rather than a preset that opens and matches differently.
+            var body = ShareableLines(s);
+            lines.Add(FilterFormat.PresetHeader(body));
             lines.Add("# exported " + DateTime.Now.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)
                       + (string.IsNullOrEmpty(fromModel) ? "" : " from " + fromModel));
             lines.Add("#");
@@ -86,7 +89,7 @@ namespace LiveClash.Core
             // reported, not how fast the machine you sent it to should work: budget, slice
             // sizes, grouping and the live on/off switch stay local. Everything inside a
             // set block travels verbatim.
-            lines.AddRange(ShareableLines(s));
+            lines.AddRange(body);
 
             File.WriteAllLines(path, lines.ToArray(), new System.Text.UTF8Encoding(true));
             Log.Info("Filter preset exported to " + path + " — " + s.Sets.Count + " set(s).");
@@ -128,7 +131,8 @@ namespace LiveClash.Core
                 if (!File.Exists(path)) { sum.Problem = "That file no longer exists."; return sum; }
 
                 var lines = File.ReadAllLines(path);
-                if (lines.Length == 0 || !lines[0].TrimStart('﻿').StartsWith("# LiveClash filter preset", StringComparison.Ordinal))
+                int formatVersion;
+                if (lines.Length == 0 || !FilterFormat.Accepts(lines[0], out formatVersion))
                 {
                     sum.Problem = "That is not a Live Clash filter preset.";
                     return sum;

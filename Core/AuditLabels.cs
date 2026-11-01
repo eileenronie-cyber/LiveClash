@@ -160,7 +160,7 @@ namespace LiveClash.Core
             get
             {
                 var dir = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    LocalState.Root,   // the real local application data, or a dev job's scratch root (DM2)
                     "LiveClash", "audit");
                 try { Directory.CreateDirectory(dir); } catch { }
                 return dir;
@@ -173,6 +173,10 @@ namespace LiveClash.Core
         /// guard names it. Null before any document has been adopted.</summary>
         public string ModelName { get { lock (_gate) return _modelKey; } }
 
+        /// <summary>The key (ClashEngine.DocKey) of the document these were last loaded for. A Save As carries them to the new
+        /// name only if this is the document being saved (LedgerProvenance, round 3b of the 2026-10-31 review).</summary>
+        public string LoadedForDocKey { get; private set; }
+
         /// <summary>
         /// Switch to a document's own labels. Cheap to call repeatedly, on purpose — see
         /// ClashStatusStore.LoadFor's class comment.
@@ -180,16 +184,29 @@ namespace LiveClash.Core
         public void LoadFor(Document doc)
         {
             RevitUser.Note(doc);
+            if (doc != null) LoadedForDocKey = ClashEngine.DocKey(doc);
 
-            string titleKey = null;
+            string titleKey, identity;
+            string[] titleLines;
+            bool titleExists;
+            string key = ResolveKey(doc, out titleKey, out identity, out titleExists, out titleLines);
+            if (string.IsNullOrEmpty(key)) return;
+            Load(key, identity, key == titleKey && titleExists ? titleLines : null);
+        }
+
+        /// <summary>The file key a document's labels live under; see ClashSettings.ResolveKey.</summary>
+        private string ResolveKey(Document doc, out string titleKey, out string identity, out bool titleExists, out string[] titleLines)
+        {
+            titleKey = null;
+            identity = null;
+            titleExists = false;
+            titleLines = null;
             try { if (doc != null && doc.IsValidObject) titleKey = ModelKey.FileSafe(doc); }
             catch (Exception ex) { Log.Warn("Audit labels: could not derive a model key", ex); }
-            if (string.IsNullOrEmpty(titleKey)) return;
+            if (string.IsNullOrEmpty(titleKey)) return null;
 
-            string identity = ModelIdentity.Compute(doc);
+            identity = ModelIdentity.Compute(doc);
             string key;
-            string[] titleLines = null;
-            bool titleExists = false;
 
             if (titleKey == _guardTitleSeen && identity == _guardIdentitySeen)
             {
@@ -216,35 +233,52 @@ namespace LiveClash.Core
                 _guardIdentitySeen = identity;
                 _guardResolvedKey = key;
             }
+            Log.NoteSensitive(titleKey);
+            Log.NoteSensitive(key);
+            return key;
+        }
 
+        /// <summary>
+        /// The file's rules: a read that fails is not "no file", the defaults are never saved over a
+        /// file that could not be read, and writes are atomic (review 2026-10-31, M9). See RewrittenFile.
+        /// </summary>
+        private RewrittenFile _file = new RewrittenFile("Audit labels");
+
+        /// <summary>
+        /// Point at <paramref name="key"/>'s file and read it. <paramref name="preRead"/> is that file's
+        /// lines when the collision guard already read them (the common, no-collision case), so the
+        /// same bytes are not read twice, the way ClashStatusStore/ResolvedLog already do.
+        /// </summary>
+        private void Load(string key, string identity, string[] preRead)
+        {
+            var path = PathFor(key);
+            string[] lines;
+            bool retry;
             lock (_gate)
             {
-                if (key == _modelKey) return;
+                if (key == _modelKey && !_file.NeedsOpen(path)) return;
+                retry = key == _modelKey;
                 _modelKey = key;
                 _identity = identity ?? "";
-                _assigned.Clear();
-                Seed();
+                lines = _file.Open(path, preRead);
+                // A retry that fails again keeps what is held; anything else starts from the seed.
+                if (!retry || lines != null)
+                {
+                    _assigned.Clear();
+                    Seed();
+                }
             }
 
-            // Reuse the title file's lines already read above when the resolved key IS the title
-            // key (the common, no-collision case) and it genuinely exists — avoids reading the
-            // same bytes twice, the way ClashStatusStore/ResolvedLog already do.
-            string[] lines;
-            if (key == titleKey && titleExists && titleLines != null)
+            if (lines == null)
             {
-                lines = titleLines;
-            }
-            else
-            {
-                var path = PathFor(key);
-                if (!File.Exists(path))
+                if (_file.Unreadable)
                 {
-                    Log.Info("Audit labels: no file yet for '" + key + "'; using the defaults.");
-                    return;
+                    if (!retry) Log.Warn("Audit labels: could not read this model's file; using the defaults, NOT saving over it, retried on the next load.");
                 }
-                try { lines = File.ReadAllLines(path); }
-                catch (Exception ex) { Log.Warn("Audit labels: could not read " + path, ex); return; }
+                else Log.Info("Audit labels: no file yet for '" + key + "'; using the defaults.");
+                return;
             }
+
 
             int labels = 0, assigns = 0;
             try
@@ -294,40 +328,76 @@ namespace LiveClash.Core
         {
             try
             {
-                var lines = new List<string>();
-                lines.Add("# LiveClash audit labels — tab separated");
-
-                // key, identity, _labels and _assigned all read under ONE lock: a LoadFor for a
-                // DIFFERENT model landing between two separate locks here could otherwise pair
-                // this model's key with the NEXT model's (freshly re-seeded) labels and identity.
-                string key, identity;
+                // Built and written under ONE lock: a LoadFor for a DIFFERENT model landing in between
+                // could otherwise pair this model's key with the NEXT model's (freshly re-seeded) labels
+                // and identity. Atomic, and refused while this model's file could not be read
+                // (RewrittenFile; review 2026-10-31, M9).
                 lock (_gate)
                 {
-                    key = _modelKey;
-                    identity = _identity;
-                    if (string.IsNullOrEmpty(key)) return;
-
-                    foreach (var l in _labels)
-                        lines.Add("label=" + Clean(l.Name) + "\t" + l.DropByDefault);
-
-                    foreach (var kv in _assigned)
-                    {
-                        // key is catId|family|type; store the parts separately so a
-                        // family name containing a pipe cannot corrupt the line.
-                        var parts = kv.Key.Split(new[] { '|' }, 3);
-                        if (parts.Length < 3) continue;
-                        lines.Add("assign=" + parts[0] + "\t" + Clean(parts[1]) + "\t"
-                                  + Clean(parts[2]) + "\t" + Clean(kv.Value));
-                    }
+                    if (string.IsNullOrEmpty(_modelKey)) return;
+                    if (_file.Path == PathFor(_modelKey)) _file.Save(LinesLocked(_identity));
                 }
-                if (!string.IsNullOrEmpty(identity)) lines.Add(ModelIdentity.Line(identity));
-
-                File.WriteAllLines(PathFor(key), lines.ToArray());
             }
             catch (Exception ex)
             {
                 Log.Warn("Audit labels: could not write the file", ex);
             }
+        }
+
+        /// <summary>
+        /// The active model was saved under a new name (Save As): its labels go with it, as the
+        /// settings do (ClashSettings.FollowSaveAs; review 2026-10-31, M4). Falls back to an ordinary
+        /// load of the new name when they cannot be carried.
+        /// </summary>
+        [RevitBound]
+        public void FollowSaveAs(Document doc)
+        {
+            if (doc != null) LoadedForDocKey = ClashEngine.DocKey(doc);
+            string titleKey, identity;
+            string[] titleLines;
+            bool titleExists;
+            string key = ResolveKey(doc, out titleKey, out identity, out titleExists, out titleLines);
+            if (string.IsNullOrEmpty(key)) return;
+            lock (_gate)
+            {
+                if (key == _modelKey) return;
+                if (!string.IsNullOrEmpty(_modelKey))
+                {
+                    // SP7 (round 8): a file that could not be read is copied as it is (and the user told if even that fails), not abandoned.
+                    bool carried = _file.Unreadable
+                        ? SaveAsCarry.CarryUnreadable(_file, PathFor(key), identity, "audit labels", ClashSettings.SayToPanel)
+                        : SaveAsCarry.CarryParsed(_file, PathFor(key), LinesLocked(identity), "audit labels", ClashSettings.SayToPanel);
+                    if (carried)
+                    {
+                        _modelKey = key;
+                        _identity = identity ?? "";
+                        Log.Info("Audit labels: carried to the model's new name after Save As.");
+                        return;
+                    }
+                }
+            }
+            Load(key, identity, key == titleKey && titleExists ? titleLines : null);
+        }
+
+        /// <summary>The file's lines. Call under _gate.</summary>
+        private List<string> LinesLocked(string identity)
+        {
+            var lines = new List<string>();
+            lines.Add("# LiveClash audit labels — tab separated");
+            foreach (var l in _labels)
+                lines.Add("label=" + Clean(l.Name) + "\t" + l.DropByDefault);
+
+            foreach (var kv in _assigned)
+            {
+                // key is catId|family|type; store the parts separately so a
+                // family name containing a pipe cannot corrupt the line.
+                var parts = kv.Key.Split(new[] { '|' }, 3);
+                if (parts.Length < 3) continue;
+                lines.Add("assign=" + parts[0] + "\t" + Clean(parts[1]) + "\t"
+                          + Clean(parts[2]) + "\t" + Clean(kv.Value));
+            }
+            if (!string.IsNullOrEmpty(identity)) lines.Add(ModelIdentity.Line(identity));
+            return lines;
         }
 
         /// <summary>Tabs are the separator, so they cannot appear in a value.</summary>

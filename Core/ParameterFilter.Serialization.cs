@@ -33,6 +33,60 @@ namespace LiveClash.Core
             return new TypeKey { Family = p[0], Type = p[1] };
         }
 
+        // ---- values (review 2026-10-31, LOW-4)
+        //
+        // A VALUE is always the LAST field of its line (pick, xpick, only, rule, grule), so it does not
+        // need the one-way '|' -> '/' escape the other fields use: it is written as it is and read back
+        // as everything after the fields before it. A picked "CHW|Supply" used to come back "CHW/Supply"
+        // and stop matching, so the element silently left the set. Files written before keep reading
+        // exactly as they did ('/' stays '/').
+        //
+        // A line break cannot stay in a one-line-per-entry file, and a multi-line value came back cut to
+        // its first line. So CR and LF are written as ESC r / ESC n, and ESC itself as ESC e: reversible
+        // for any value. An older build reading a new file sees those as plain characters: the value
+        // does not match, the same failure as before, never a worse one.
+
+        private const char Esc = '\u001b';
+
+        /// <summary>A value as written: as it is, with CR, LF and ESC escaped.</summary>
+        internal static string Value(string v)
+        {
+            if (string.IsNullOrEmpty(v)) return "";
+            if (v.IndexOf(Esc) < 0 && v.IndexOf('\r') < 0 && v.IndexOf('\n') < 0) return v;
+            var sb = new System.Text.StringBuilder(v.Length + 4);
+            foreach (var c in v)
+            {
+                if (c == Esc) sb.Append(Esc).Append('e');
+                else if (c == '\r') sb.Append(Esc).Append('r');
+                else if (c == '\n') sb.Append(Esc).Append('n');
+                else sb.Append(c);
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>The value of a split line: every field from <paramref name="from"/> on, re-joined with
+        /// the '|' they were split on, and unescaped (see <see cref="Value"/>).</summary>
+        internal static string ValueFrom(string[] p, int from)
+        {
+            if (p == null || from >= p.Length) return "";
+            var v = from == p.Length - 1 ? p[from] : string.Join("|", p, from, p.Length - from);
+            if (v.IndexOf(Esc) < 0) return v;
+            var sb = new System.Text.StringBuilder(v.Length);
+            for (int i = 0; i < v.Length; i++)
+            {
+                char c = v[i];
+                if (c == Esc && i + 1 < v.Length)
+                {
+                    char n = v[i + 1];
+                    if (n == 'e') { sb.Append(Esc); i++; continue; }
+                    if (n == 'r') { sb.Append('\r'); i++; continue; }
+                    if (n == 'n') { sb.Append('\n'); i++; continue; }
+                }
+                sb.Append(c);
+            }
+            return sb.ToString();
+        }
+
         public List<string> Serialize(string prefix)
         {
             var lines = new List<string>();
@@ -42,15 +96,15 @@ namespace LiveClash.Core
                 lines.Add(prefix + "param=" + p.Scope + "|" + (p.Name ?? "").Replace('|', '/'));
             foreach (var v in Picked)
                 lines.Add(prefix + "pick=" + v.Scope + "|" + (v.ParameterName ?? "").Replace('|', '/')
-                          + "|" + (v.Value ?? "").Replace('|', '/'));
+                          + "|" + Value(v.Value));
             foreach (var v in Excluded)
                 lines.Add(prefix + "xpick=" + v.Scope + "|" + (v.ParameterName ?? "").Replace('|', '/')
-                          + "|" + (v.Value ?? "").Replace('|', '/'));
+                          + "|" + Value(v.Value));
             foreach (var v in ExcludedTypes)
                 lines.Add(prefix + "xtype=" + SerializeTypeKey(v));
             foreach (var v in OnlyValues)
                 lines.Add(prefix + "only=" + v.Scope + "|" + (v.ParameterName ?? "").Replace('|', '/')
-                          + "|" + (v.Value ?? "").Replace('|', '/'));
+                          + "|" + Value(v.Value));
             // The leading index is what keeps two rules apart when they share a scope,
             // an operator and a parameter. Without it the reader had nothing else to
             // match on, so two rules collapsed into one with two values on reload —
@@ -63,7 +117,7 @@ namespace LiveClash.Core
                 if (r.Op == RuleOp.IsEmpty || r.Op == RuleOp.IsNotEmpty || r.Values.Count == 0)
                     lines.Add(head);
                 else
-                    foreach (var v in r.Values) lines.Add(head + (v ?? "").Replace('|', '/'));
+                    foreach (var v in r.Values) lines.Add(head + Value(v));
             }
 
             // Groups: one "group=<i>|<Join>" declaring the set, then its rules as
@@ -83,7 +137,7 @@ namespace LiveClash.Core
                     if (r.Op == RuleOp.IsEmpty || r.Op == RuleOp.IsNotEmpty || r.Values.Count == 0)
                         lines.Add(head);
                     else
-                        foreach (var v in r.Values) lines.Add(head + (v ?? "").Replace('|', '/'));
+                        foreach (var v in r.Values) lines.Add(head + Value(v));
                 }
             }
             return lines;
@@ -145,7 +199,7 @@ namespace LiveClash.Core
                     var scope = (ParamScope)Enum.Parse(typeof(ParamScope), p[f]);
                     var op = (RuleOp)Enum.Parse(typeof(RuleOp), p[f + 1]);
                     var name = p[f + 2];
-                    var val = p.Length >= f + 4 ? p[f + 3] : "";
+                    var val = ValueFrom(p, f + 3);
 
                     Rule found = null;
 
@@ -207,7 +261,7 @@ namespace LiveClash.Core
                     var gscope = (ParamScope)Enum.Parse(typeof(ParamScope), p[f]);
                     var gop = (RuleOp)Enum.Parse(typeof(RuleOp), p[f + 1]);
                     var gname = p[f + 2];
-                    var gval = p.Length >= f + 4 ? p[f + 3] : "";
+                    var gval = ValueFrom(p, f + 3);
 
                     Rule gfound = null;
 
@@ -252,7 +306,7 @@ namespace LiveClash.Core
                     {
                         Scope = (ParamScope)Enum.Parse(typeof(ParamScope), p[0]),
                         ParameterName = p[1],
-                        Value = p[2]
+                        Value = ValueFrom(p, 2)
                     };
                     if (key == "only") OnlyValues.Add(vp);
                     else if (key == "xpick") Excluded.Add(vp);

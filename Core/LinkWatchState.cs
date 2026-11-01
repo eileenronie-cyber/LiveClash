@@ -157,6 +157,9 @@ namespace LiveClash.Core
 
         private static void Record(Kind kind, string linkName)
         {
+            // A link name carries project codes. Noted so the log never writes it as it is (round 2, DL8); the
+            // trimmed form, because the same name turns up with and without ".rvt".
+            if (!string.IsNullOrEmpty(linkName)) Log.NoteSensitive(TrimRvt(linkName.Trim()));
             _current = new Notice
             {
                 Kind = kind,

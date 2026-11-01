@@ -137,6 +137,12 @@ namespace LiveClash.Core
         /// </returns>
         public List<ClashResult> RemoveForElement(ElementId id)
         {
+            return RemoveForElement(id, true);   // an overload, not an optional parameter: callers pass this as a method group
+        }
+
+        /// <summary>As above; with <paramref name="asResolved"/> false the rows leave the list without entering the just-fixed window (an element that vanished by an undone creation is not a fix).</summary>
+        public List<ClashResult> RemoveForElement(ElementId id, bool asResolved)
+        {
             var removed = new List<ClashResult>();
             if (id == null) return removed;
             long v = IdUtil.Value(id);
@@ -156,7 +162,7 @@ namespace LiveClash.Core
                     ClashResult gone;
                     if (_results.TryGetValue(k, out gone))
                     {
-                        _resolved[k] = new KeyValuePair<ClashResult, DateTime>(gone, now);
+                        if (asResolved) _resolved[k] = new KeyValuePair<ClashResult, DateTime>(gone, now);   // false: the element vanished by an undone creation, not a fix (M-2)
                         IndexRemove(k, gone);
                         removed.Add(gone);
                     }
@@ -173,8 +179,11 @@ namespace LiveClash.Core
         /// same recently-resolved path as an edit-driven removal, so a clash the
         /// background verifier notices still shows its green struck-through row —
         /// the user sees the fix land whether they triggered the check or not.
+        ///
+        /// <paramref name="asResolved"/> false (SP5): the pair is DROPPED, not fixed - its link was removed from the model - so it
+        /// leaves the list without entering the just-fixed window, where the panel would draw it as a fix.
         /// </summary>
-        public void RemoveKeys(ICollection<string> keys)
+        public void RemoveKeys(ICollection<string> keys, bool asResolved = true)
         {
             if (keys == null || keys.Count == 0) return;
             bool dirty = false;
@@ -185,11 +194,24 @@ namespace LiveClash.Core
                 {
                     ClashResult gone;
                     if (!_results.TryGetValue(k, out gone)) continue;
-                    _resolved[k] = new KeyValuePair<ClashResult, DateTime>(gone, now);
+                    if (asResolved) _resolved[k] = new KeyValuePair<ClashResult, DateTime>(gone, now);   // r8 SP5: false = dropped, not fixed
                     _results.Remove(k);
                     IndexRemove(k, gone);
                     dirty = true;
                 }
+            }
+            if (dirty) RaiseChanged();
+        }
+
+        /// <summary>Take these keys out of the just-fixed window (a pair that was dropped, not fixed, must not read as fixed).</summary>
+        public void ForgetResolved(IEnumerable<string> keys)
+        {
+            if (keys == null) return;
+            bool dirty = false;
+            lock (_gate)
+            {
+                foreach (var k in keys)
+                    if (k != null && _resolved.Remove(k)) dirty = true;
             }
             if (dirty) RaiseChanged();
         }
@@ -245,6 +267,18 @@ namespace LiveClash.Core
                     }
             }
             if (dirty) RaiseChanged();
+        }
+
+        /// <summary>
+        /// The results are being thrown away because the RULES changed (the filter, the clearance, the audit drops, a settings re-read). Clears the list
+        /// and lets go of the document's held link rows (DroppedLinkRows): rows held under the old rules would come back, on an undo of a link
+        /// removal, to be judged under the new ones, and a clearance-only pair judged Resolved there would be recorded as fixed with nothing in the
+        /// model changed (delta review 3, D3-2). Pass the key of the document whose results these are (null forgets none).
+        /// </summary>
+        public void ClearForNewRules(string docKey)
+        {
+            Clear();
+            DroppedLinkRows.Forget(docKey);
         }
 
         public void Clear()

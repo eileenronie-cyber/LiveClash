@@ -76,12 +76,42 @@ namespace LiveClash.Core
             return taken;
         }
 
+        /// <summary>Drop a closed document's waiting ids by its key (the Document object is gone by then).</summary>
+        public static void ClearKey(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return;
+            lock (Gate) Pending.Remove(key);
+        }
+
         public static void Clear(Document doc)
         {
             lock (Gate)
             {
                 if (doc == null) Pending.Clear();
                 else Pending.Remove(DocKey(doc));
+            }
+        }
+
+        /// <summary>
+        /// Move a document's waiting ids from one key to another, for the one event that changes a
+        /// document's key underneath them: Save As. Left alone, a bulk edit still draining when the
+        /// model was saved under a new name was never checked (review 2026-10-31, LOW-2). Merges into
+        /// anything already waiting under the new key.
+        /// </summary>
+        /// <returns>How many ids moved.</returns>
+        public static int Rekey(string fromKey, string toKey)
+        {
+            if (string.IsNullOrEmpty(fromKey) || string.IsNullOrEmpty(toKey) || fromKey == toKey) return 0;
+            lock (Gate)
+            {
+                HashSet<long> from;
+                if (!Pending.TryGetValue(fromKey, out from) || from.Count == 0) return 0;
+                Pending.Remove(fromKey);
+                HashSet<long> to;
+                if (!Pending.TryGetValue(toKey, out to)) { Pending[toKey] = from; return from.Count; }
+                int moved = 0;
+                foreach (var v in from) if (to.Add(v)) moved++;
+                return moved;
             }
         }
 

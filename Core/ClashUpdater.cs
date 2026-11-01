@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using Autodesk.Revit.DB;
 
 namespace LiveClash.Core
@@ -51,13 +52,25 @@ namespace LiveClash.Core
 
         public void Execute(UpdaterData data)
         {
-            var settings = ClashSettings.Current;
-            if (!settings.Enabled) return;
+            // Rows taken out of the store for the re-check below. A throw before they are put back must
+            // not lose them (review 2026-10-31, LOW-1): the catch restores any that are not listed.
+            List<ClashResult> takenOut = null;
 
             try
             {
+                // INSIDE the try: the getter reads and parses the settings file, and the updater must never
+                // throw (delta review 2026-10-31, DL-j). An unreadable file means this edit is not checked, logged
+                // below; it must never be an exception into Revit's transaction.
+                var settings = ClashSettings.Current;
+                if (!settings.Enabled) return;
+
                 var doc = data.GetDocument();
                 if (doc == null || !doc.IsValidObject) return;
+
+                // Only the session's own document. The store holds ITS rows, and RemoveForElement matches a
+                // bare id, so an edit in a family being edited or in another open project could take rows
+                // whose ids merely collide (review 2026-10-31, H1).
+                if (!LiveClashApp.IsSessionDocument(doc)) return;
 
                 // Deleted elements: RECORD everything they were involved in, then
                 // forget it. Forgetting alone is what this used to do, and it lost
@@ -111,6 +124,8 @@ namespace LiveClash.Core
                 // A row whose HOST also changed is NOT left alone: hostChanged below.
                 List<ClashResult> hostChanged;
                 var targetOnly = SplitRemovedRows(changed, ClashResultStore.Instance.RemoveForElement, out hostChanged);
+                takenOut = new List<ClashResult>(targetOnly);
+                takenOut.AddRange(hostChanged);
                 if (targetOnly.Count > 0) ReverifyTargetOnly(doc, settings, targetOnly);
 
                 // Big edit: don't do it inline. Hand it to idle time.
@@ -157,12 +172,53 @@ namespace LiveClash.Core
                     Log.Info("Budget hit (" + sw.ElapsedMilliseconds + " ms); deferred "
                              + notChecked.Count + " element(s).");
                 }
+
+                // The reverse: a changed or added element that is a TARGET of a set is checked against the SOURCE
+                // elements near it, which the pass above never does (it only tests a changed element AS a source).
+                // Without this a cable tray drawn through a pipe, with only pipes as sources, was never listed until a
+                // full check (review N1). It runs AFTER everything the forward pass owes (the re-verify and the deferral
+                // above) and in its own try: a throw here must not leave those undone (review L2). Shares the same
+                // stopwatch; what it cannot finish inside the budget is deferred like a big source edit. A pair it lists
+                // is not a fix, so a moved fix queued for the same key a moment ago leaves the queue (review L6).
+                try
+                {
+                    List<ElementId> notCheckedTargets;
+                    var targetRows = ClashEngine.CheckTargetsAllSets(doc, changed, settings, sw, false, out notCheckedTargets);
+                    ClashResultStore.Instance.AddRange(targetRows);
+                    DropPendingMovedForKeys(DocKeyOf(doc), targetRows.Where(r => r != null && r.Key != null).Select(r => r.Key).ToList());
+                    if (notCheckedTargets.Count > 0) DeferredQueue.Enqueue(doc, notCheckedTargets);
+                }
+                catch (Exception ex) { Log.Warn("The reverse check failed; the forward pass is unaffected", ex); }
             }
             catch (Exception ex)
             {
                 // Swallow deliberately — see the class comment.
                 Log.Error("ClashUpdater.Execute failed", ex);
+                RestoreUnlisted(takenOut);
             }
+        }
+
+        /// <summary>
+        /// Put back any of <paramref name="rows"/> the store no longer lists. A row the re-check had already
+        /// shown fixed may come back too; that is the safe direction (the next auto-verify takes it off
+        /// again), where losing a real clash is not. Never throws.
+        /// </summary>
+        internal static void RestoreUnlisted(List<ClashResult> rows)
+        {
+            if (rows == null || rows.Count == 0) return;
+            try
+            {
+                var listed = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var r in ClashResultStore.Instance.Snapshot()) if (r != null && r.Key != null) listed.Add(r.Key);
+                var back = new List<ClashResult>();
+                foreach (var r in rows) if (r != null && !string.IsNullOrEmpty(r.Key) && !listed.Contains(r.Key)) back.Add(r);
+                if (back.Count > 0)
+                {
+                    ClashResultStore.Instance.AddRange(back);
+                    Log.Warn("Live check failed part-way; " + back.Count + " clash(es) it had taken off the list were put back.", null);
+                }
+            }
+            catch (Exception ex) { Log.Warn("Could not put clashes back after a failed live check", ex); }
         }
 
         /// <summary>
@@ -217,9 +273,13 @@ namespace LiveClash.Core
         /// StillClashing and Unknown both put the row back — Unknown most often means a link is
         /// not currently loaded, and dropping a clash because its other half cannot be seen right
         /// now is exactly the failure PairVerifier's own class comment warns against. Only a
-        /// confirmed Resolved verdict leaves it gone. Never writes to the resolved ledger: that is
-        /// the background auto-verify pass's job, and it will pick up a genuine fix on its own
-        /// next tick, the same as it always has for anything not caught by the live path.
+        /// confirmed Resolved verdict leaves it off the panel, but QUEUED, like a host-side fix
+        /// (<see cref="ReverifyHostChanged"/>): recorded at Save or Sync after PairVerifier has asked
+        /// again, and asked again on a rollback or an idle tick, so a move of the row's other element
+        /// that is rolled back brings the clash back (second pass 2026-10-31, SP2). Before, a Resolved
+        /// row was simply dropped: a rollback had nothing to re-ask, and the fix was never recorded,
+        /// since the row is gone from the store and nothing else (auto-verify, Recheck, a full check)
+        /// ever sees it. Writes nothing to the ledger here, inside the transaction.
         /// </summary>
         internal static void ReverifyTargetOnly(Document doc, ClashSettings settings, List<ClashResult> rows)
         {
@@ -236,7 +296,7 @@ namespace LiveClash.Core
             {
                 ClashSeverity sev;
                 var verdict = PairVerifier.Verify(doc, r, settings, links, out sev);
-                if (verdict == PairVerifier.Verdict.Resolved) continue;
+                if (verdict == PairVerifier.Verdict.Resolved) { QueueMovedRow(doc, r); continue; }
                 if (verdict == PairVerifier.Verdict.StillClashing) r.Severity = sev;
                 keep.Add(r);
             }
@@ -256,7 +316,7 @@ namespace LiveClash.Core
         /// apart: StillClashing/Unknown restores the row (never lost, just not yet proven
         /// fixed); only a confirmed Resolved gets recorded.
         ///
-        /// UNLIKE ReverifyTargetOnly, this DOES write to the resolved ledger — because unlike
+        /// UNLIKE ReverifyTargetOnly, this DOES feed the resolved ledger — because unlike
         /// that case, nothing else ever gets a turn at this one. The live path is the single
         /// most common way a clash actually gets resolved (editing something to fix it, not
         /// deleting it), and this removal has already taken the row out of the store by the
@@ -268,10 +328,11 @@ namespace LiveClash.Core
         /// run right afterward showed nothing newly resolved because there was nothing left in
         /// its own "before" snapshot to have noticed the gap.
         ///
-        /// No deferral needed here the way a deletion needs one: the changed element still
-        /// EXISTS (this is the modify path, not the delete one — see QueueDeleted), so an Undo
-        /// immediately after fires its own DocumentChanged with this same element in it, and
-        /// the ordinary live re-check restores the clash correctly if it comes back.
+        /// CORRECTION 2026-10-31 (review H2): this used to say no deferral was needed, because an
+        /// Undo re-checks the element. The re-check put the clash back on the panel, but the
+        /// "fixed" entry written here stayed in the ledger, and a ROLLBACK (a cancelled Revit
+        /// error, another add-in's TransactionGroup) re-checked nothing at all. So a confirmed fix
+        /// is now queued exactly like a deletion and recorded at Save or Sync, re-verified then.
         /// </summary>
         /// <param name="doc">The document the rows belong to.</param>
         /// <param name="settings">The live settings the rows were found under.</param>
@@ -288,7 +349,6 @@ namespace LiveClash.Core
             }
 
             var restore = new List<ClashResult>();
-            var confirmedGone = new List<string>();
             var fixedOnes = new List<ClashResult>();
             foreach (var r in rows)
             {
@@ -296,7 +356,6 @@ namespace LiveClash.Core
                 var verdict = PairVerifier.Verify(doc, r, settings, links, out sev);
                 if (verdict == PairVerifier.Verdict.Resolved)
                 {
-                    confirmedGone.Add(r.Key);
                     fixedOnes.Add(r);
                 }
                 else
@@ -307,33 +366,308 @@ namespace LiveClash.Core
             }
 
             if (restore.Count > 0) ClashResultStore.Instance.AddRange(restore);
-            if (confirmedGone.Count > 0)
-            {
-                // Against the decision first, so a pair that was accepted and has now been
-                // fixed shows as Reopened if it ever comes back rather than being silently
-                // re-hidden — the same order FlushDeletedResolutions and RecordResolved use.
-                ClashStatusStore.Instance.NoteGone(confirmedGone);
-                ResolvedLog.Add(fixedOnes);
-            }
+
+            // QUEUED, not written (review 2026-10-31, H2). This runs inside the transaction, before it has
+            // held: a rollback (a cancelled error, another add-in's TransactionGroup) or an undo puts the
+            // geometry back and would have left a "fixed" entry for a clash that is still there. A move is
+            // now a fix the way a deletion is: once it is in the saved model, re-verified at Save or Sync
+            // (FlushDeletedResolutions). That also takes the file I/O out of the transaction.
+            foreach (var r in fixedOnes) QueueMovedRow(doc, r);
 
             // Every other path that records a fix logs it; this one did not, so only the ledger file
             // could prove it had run (Roadmap R03). One line per call, only when there was something to say.
             if (rows.Count > 0)
                 Log.Info("Re-verified " + rows.Count + " clash(es) after a " + (source ?? "change") + ": "
-                         + fixedOnes.Count + " confirmed resolved and recorded, " + restore.Count
+                         + fixedOnes.Count + " confirmed resolved and queued for the next save, " + restore.Count
                          + " kept (still clashing or not verifiable now).");
         }
 
         // -------------------------------------------------- deletions, recorded late
 
         /// <summary>
-        /// A deletion that has happened but has not yet been shown to survive.
+        /// A fix that has happened but has not yet been shown to survive: a deletion, or (since the
+        /// 2026-10-31 review, H2) a move that took the pair apart. For a move, DeletedId is the host.
         /// </summary>
         private sealed class PendingResolution
         {
             public string DocKey;
             public ElementId DeletedId;
             public ClashResult Row;
+            public bool Moved;
+
+            /// <summary>A deletion the settings reset kept (DropPendingMoved). Its element is gone, which is a fix under any rules; but if the element comes
+            /// back (an undo) it must NOT be re-tested under the new rules and recorded: the list it was found in is gone (delta check, DC-2).</summary>
+            public bool RulesReplaced;
+
+            /// <summary>When this fix was last asked again (MinValue = never), so a slice takes the oldest first.</summary>
+            public DateTime CheckedUtc;
+        }
+
+        /// <summary>
+        /// Queue a row a MOVE resolved (both elements still exist), to be re-verified and recorded at
+        /// Save or Sync like a deletion. See ReverifyHostChanged for why it is not recorded at once.
+        /// </summary>
+        internal static void QueueMovedRow(Document doc, ClashResult row)
+        {
+            if (doc == null || row == null || string.IsNullOrEmpty(row.Key) || row.HostElementId == null) return;
+
+            // A settings re-read has swapped the rules and the idle handler has not reset the results yet: this row was judged Resolved under
+            // rules the list was not found under, and the save would record it as fixed with nothing in the model changed (delta review 3, D3-1).
+            // The updater's own read of the settings can be the one that swapped them, inside a transaction. The reset clears the list, and the
+            // next check lists what the new rules find.
+            if (ClashSettings.RulesReloadPending)
+            {
+                // Said, not silent (delta review 3, DC-6): a genuine move made in the transaction or tick where the swap lands is lost here. No key or
+                // name in the line.
+                Log.Info("A moved fix was not queued: the settings were just re-read, so the rules changed under it; the next check lists what the new rules find.");
+                return;
+            }
+
+            lock (PendingGate)
+                Pending.Add(new PendingResolution { DocKey = DocKeyOf(doc), DeletedId = row.HostElementId, Row = row, Moved = true });
+        }
+
+        /// <summary>
+        /// An undo, a redo or a rollback just touched <paramref name="ids"/>. Every queued fix of this
+        /// document that names one of them is asked again, now: one that is no longer Resolved goes
+        /// back on the panel and leaves the queue (it never was a fix), and one that still is stays
+        /// queued for the save.
+        ///
+        /// This is what brings back the clash of an undone TARGET deletion (review 2026-10-31, M1):
+        /// the undo re-queues the target only as a source, which it is not, and the host never moved,
+        /// so nothing else would ever re-test the pair. And it is what brings back a clash a rolled-back
+        /// move had taken off (H2). Never throws.
+        /// </summary>
+        /// <returns>How many rows went back on the panel.</returns>
+        internal static int ReconcilePending(Document doc, ICollection<ElementId> ids)
+        {
+            if (doc == null || ids == null || ids.Count == 0) return 0;
+            try
+            {
+                string key = DocKeyOf(doc);
+                var touched = new HashSet<long>();
+                foreach (var id in ids) if (id != null) touched.Add(IdUtil.Value(id));
+
+                var asked = new List<PendingResolution>();
+                lock (PendingGate)
+                    foreach (var p in Pending)
+                        if (p.DocKey == key && p.Row != null && Names(p, touched)) asked.Add(p);
+                return Reconcile(doc, asked);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("Could not reconcile queued fixes after an undo or rollback", ex);
+                return 0;
+            }
+        }
+
+        /// <summary>
+        /// Ask up to <paramref name="max"/> of this document's queued fixes again, the ones asked longest ago
+        /// first, whatever any event listed. Two callers (review 2026-10-31, H2): the idle verify pass, every
+        /// tick, because a TransactionGroup rollback is not shown to raise any event that could put a row back,
+        /// and nothing else would; and the document-changed handler on a rollback, where the event may list no ids.
+        /// A fix that is no longer Resolved goes back on the panel and leaves the queue. It only ever puts rows
+        /// back, never takes one off. Never throws.
+        /// </summary>
+        /// <returns>How many rows went back on the panel.</returns>
+        internal static int ReconcilePendingSlice(Document doc, int max, int budgetMs = 150, string kind = "tick")
+        {
+            if (doc == null || max <= 0) return 0;
+            if (kind == "rollback") _backlogSinceUtc = DateTime.UtcNow;   // what this pass does not reach is the backlog the idle ticks drain
+            try
+            {
+                string key = DocKeyOf(doc);
+                List<PendingResolution> all;
+                lock (PendingGate)
+                    all = Pending.Where(p => p.DocKey == key && p.Row != null)
+                                 .OrderBy(p => p.CheckedUtc)
+                                 .ToList();
+                return Reconcile(doc, all.Take(max).ToList(), all.Count, budgetMs, kind);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("Could not reconcile queued fixes on the idle pass", ex);
+                return 0;
+            }
+        }
+
+        /// <summary>
+        /// Remember the ids a COMMITTED transaction deleted, so a later rollback can tell an element a user deleted (a fix) from one whose creation
+        /// the rollback undid. Element ids are never reused, so the memory only grows; past its cap the document is marked overflowed and
+        /// DropRowsOfVanishedElements drops nothing for it until it closes, because a permanent record must never silently lose a real fix
+        /// (recording a rolled-back draw is the older, known behaviour). It is forgotten when the document closes.
+        /// </summary>
+        internal static void NoteCommittedDeletions(Document doc, ICollection<ElementId> deletedIds)
+        {
+            if (doc == null || deletedIds == null || deletedIds.Count == 0) return;
+            try
+            {
+                var ids = new List<long>(deletedIds.Count);
+                foreach (var id in deletedIds) if (id != null) ids.Add(IdUtil.Value(id));
+                if (CommittedDeletions.Shared.Note(DocKeyOf(doc), ids))
+                    Log.Info("Too many deleted elements to remember in this session: rolled-back draws are no longer dropped from the list for this model until it is closed.");
+            }
+            catch (Exception ex) { Log.Warn("Could not remember a committed deletion", ex); }
+        }
+
+        /// <summary>Forget what NoteCommittedDeletions remembered for a document that is closing.</summary>
+        internal static void ForgetCommittedDeletions(string docKey)
+        {
+            if (string.IsNullOrEmpty(docKey)) return;
+            CommittedDeletions.Shared.Forget(docKey);
+        }
+
+        /// <summary>
+        /// A ROLLBACK just ended (it lists no ids, measured): drop, unrecorded and not shown as fixed, every listed row whose host element, or non-link
+        /// other element, no longer exists and was NOT deleted by an earlier committed transaction. After a rollback an element can only be gone from the
+        /// model because the rollback undid its creation; an element a user deleted before is a fix, and its row is left to the normal route (the deletion
+        /// queue, or auto-verify when live checking was paused). For a document whose memory overflowed nothing is dropped. Never throws.
+        /// </summary>
+        /// <returns>How many rows were dropped.</returns>
+        internal static int DropRowsOfVanishedElements(Document doc)
+        {
+            if (doc == null) return 0;
+            try
+            {
+                string key = DocKeyOf(doc);
+                if (CommittedDeletions.Shared.Overflowed(key)) return 0;
+
+                var drop = new List<string>();
+                foreach (var r in ClashResultStore.Instance.Snapshot())
+                {
+                    if (r == null || string.IsNullOrEmpty(r.Key)) continue;
+                    if (VanishedByRollback(doc, key, r.HostElementId)
+                        || (r.LinkInstanceId == null && VanishedByRollback(doc, key, r.OtherElementId)))
+                        drop.Add(r.Key);
+                }
+                if (drop.Count > 0) ClashResultStore.Instance.RemoveKeys(drop, asResolved: false);   // dropped, not fixed: it must not read as a fix on the panel
+                return drop.Count;
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("Could not drop the rows of elements a rollback removed", ex);
+                return 0;
+            }
+        }
+
+        private static bool VanishedByRollback(Document doc, string docKey, ElementId id)
+        {
+            if (id == null) return false;
+            if (StillThere(doc, id)) return false;
+            return CommittedDeletions.Shared.Knowledge(docKey, IdUtil.Value(id)) == DeletionKnowledge.NotDeleted;
+        }
+        // When the last rollback pass began. Queued fixes whose CheckedUtc is older than this were not reached by it (the slices take the oldest
+        // first), so they are the backlog; it is forgotten once there are none.
+        private static DateTime _backlogSinceUtc = DateTime.MinValue;
+
+        /// <summary>
+        /// Are there queued fixes of <paramref name="doc"/> that have not been asked again since the last rollback pass (a rollback pass can
+        /// stop by time before it reaches all of them)? The idle tick drains them slice by slice (LiveClashApp.DrainReconcileBacklog). Never throws.
+        /// </summary>
+        internal static bool ReconcileBacklogRemains(Document doc)
+        {
+            try
+            {
+                var since = _backlogSinceUtc;
+                if (doc == null || since == DateTime.MinValue) return false;
+                string key = DocKeyOf(doc);
+                bool any;
+                lock (PendingGate) any = Pending.Any(p => p.DocKey == key && p.Row != null && p.CheckedUtc < since);
+                if (!any) _backlogSinceUtc = DateTime.MinValue;
+                return any;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>The shared body: re-verify <paramref name="asked"/>, put back what is not a fix.</summary>
+        private static int Reconcile(Document doc, List<PendingResolution> asked, int queued = 0, int budgetMs = int.MaxValue, string kind = null)
+        {
+            if (asked == null || asked.Count == 0) return 0;
+            try
+            {
+                var now = DateTime.UtcNow;
+                var back = new List<ClashResult>();
+                var settled = new List<PendingResolution>();
+                Dictionary<long, LinkContext> links = null;
+
+                // Each queued fix is asked in turn, oldest first, and the slice stops when its time is spent (SP8): what it did not reach keeps its
+                // old CheckedUtc and is first in line next time. The first is always asked, so a slice always makes progress.
+                var clock = Stopwatch.StartNew();
+                var slice = SliceBudget.Run(asked, budgetMs, () => clock.ElapsedMilliseconds, p =>
+                {
+                    p.CheckedUtc = now;
+                    if (!p.Moved && !StillThere(doc, p.DeletedId)) return;   // still deleted: still a fix to record
+                    if (!p.Moved && p.RulesReplaced)
+                    {
+                        // Kept by a settings reset and the element is back: the pair was found under rules that are gone, and under the new ones it
+                        // would be judged Resolved and recorded as fixed with nothing in the model changed. The list was reset; the next check lists
+                        // what the new rules find (delta check, DC-2).
+                        settled.Add(p);
+                        return;
+                    }
+                    if (links == null && p.Row.LinkInstanceId != null) links = PairVerifier.LinkLookup(doc);
+                    ClashSeverity sev;
+                    var verdict = PairVerifier.Verify(doc, p.Row, ClashSettings.Current, links, out sev);
+                    if (verdict == PairVerifier.Verdict.Resolved) return;      // still fixed: recorded at the save
+                    if (verdict == PairVerifier.Verdict.StillClashing) p.Row.Severity = sev;
+                    back.Add(p.Row);
+                    settled.Add(p);
+                });
+
+                if (kind != null) LogSliceTiming(kind, asked.Count, queued, slice);
+
+                if (settled.Count > 0)
+                    lock (PendingGate) foreach (var p in settled) Pending.Remove(p);
+                if (back.Count > 0)
+                {
+                    ClashResultStore.Instance.AddRange(back);
+                    Log.Info("Undo/rollback brought back " + back.Count + " clash(es) that were waiting to be recorded as fixed; not recorded.");
+                }
+                return back.Count;
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("Could not reconcile queued fixes after an undo or rollback", ex);
+                return 0;
+            }
+        }
+
+        private static DateTime _lastTickLogUtc = DateTime.MinValue;
+
+        /// <summary>
+        /// The timing line of a reconcile slice (SP8 / E7): every rollback pass, and a tick when it was slow, was stopped by time, or has not been
+        /// logged for a minute. The numbers are what the time budget is judged on.
+        /// </summary>
+        private static void LogSliceTiming(string kind, int asked, int queued, SliceResult slice)
+        {
+            try
+            {
+                bool log = true;
+                if (kind == "tick")
+                {
+                    log = SliceBudget.ShouldLogTick(asked, slice.Ms, slice.StoppedByTime, (DateTime.UtcNow - _lastTickLogUtc).TotalSeconds);
+                    if (log) _lastTickLogUtc = DateTime.UtcNow;
+                }
+                if (log) Log.Info(SliceBudget.TimingLine(kind, asked, queued, slice.Done, slice.Ms, slice.StoppedByTime));
+            }
+            catch { }
+        }
+
+        private static bool Names(PendingResolution p, HashSet<long> ids)
+        {
+            if (p.DeletedId != null && ids.Contains(IdUtil.Value(p.DeletedId))) return true;
+            if (p.Row.HostElementId != null && ids.Contains(IdUtil.Value(p.Row.HostElementId))) return true;
+            return p.Row.LinkInstanceId == null && p.Row.OtherElementId != null && ids.Contains(IdUtil.Value(p.Row.OtherElementId));
+        }
+
+        private static bool StillThere(Document doc, ElementId id)
+        {
+            try
+            {
+                var e = doc.GetElement(id);
+                return e != null && e.IsValidObject;
+            }
+            catch { return false; }
         }
 
         private static readonly object PendingGate = new object();
@@ -439,31 +773,62 @@ namespace LiveClash.Core
                 var rows = new List<ClashResult>();
                 var keys = new List<string>();
                 var seen = new HashSet<string>();
-                int restored = 0;
+                var back = new List<ClashResult>();
+                Dictionary<long, LinkContext> links = null;
 
                 foreach (var p in batch)
                 {
-                    // Back again: undone before the save landed.
-                    Element still;
-                    try { still = doc.GetElement(p.DeletedId); } catch { still = null; }
-                    if (still != null && still.IsValidObject) { restored++; continue; }
+                    try
+                    {
+                        // A deletion whose element is gone from what was just saved: that IS the verdict.
+                        // A deletion whose element is BACK (undone before the save landed), and every move,
+                        // is asked again: the save is what makes it a fix, and only if it is still one.
+                        if (!p.Moved && p.RulesReplaced && StillThere(doc, p.DeletedId)) continue;   // kept by a settings reset, then undone: neither recorded nor listed (DC-2)
+                        if (p.Moved || StillThere(doc, p.DeletedId))
+                        {
+                            if (links == null && p.Row.LinkInstanceId != null) links = PairVerifier.LinkLookup(doc);
+                            ClashSeverity sev;
+                            PairVerifier.Verdict verdict;
+                            verdict = PairVerifier.Verify(doc, p.Row, ClashSettings.Current, links, out sev);
+                            if (verdict != PairVerifier.Verdict.Resolved)
+                            {
+                                // Not a fix after all, or not one that can be shown now (Unknown: a link not
+                                // loaded). Back on the panel - the store had already dropped it (review
+                                // 2026-10-31, M1: this used to be counted "restored" and left off the list).
+                                if (verdict == PairVerifier.Verdict.StillClashing) p.Row.Severity = sev;
+                                back.Add(p.Row);
+                                continue;
+                            }
+                        }
 
-                    // Both ends deleted at once would otherwise list the pair twice.
-                    if (!seen.Add(p.Row.Key)) continue;
+                        // Both ends deleted at once would otherwise list the pair twice.
+                        if (!seen.Add(p.Row.Key)) continue;
 
-                    rows.Add(p.Row);
-                    keys.Add(p.Row.Key);
+                        rows.Add(p.Row);
+                        keys.Add(p.Row.Key);
+                    }
+                    catch (Exception ex)
+                    {
+                        // One entry whose re-test throws (an invalid object, a link mid-reload) used to take the whole batch with
+                        // it: the catch below ended the flush, and every other queued fix was neither recorded nor restored (review
+                        // 2026-10-31 round 2, DL3). It is unmeasured, so it is listed again and left unrecorded, like an Unknown.
+                        Log.Warn("A queued fix could not be re-tested at the save; it is listed again and left unrecorded", ex);
+                        back.Add(p.Row);
+                    }
                 }
 
-                if (restored > 0)
-                    Log.Info("Deletion did not survive to the save (undone); "
-                             + restored + " clash(es) left unrecorded.");
+                if (back.Count > 0)
+                {
+                    ClashResultStore.Instance.AddRange(back);
+                    Log.Info("A queued fix did not survive to the save (undone, or not shown fixed now); "
+                             + back.Count + " clash(es) listed again and left unrecorded.");
+                }
 
                 if (rows.Count == 0) return;
 
                 ClashStatusStore.Instance.NoteGone(keys);
                 ResolvedLog.Add(rows);
-                Log.Info("Deleted element(s) resolved " + rows.Count + " clash(es); recorded.");
+                Log.Info("Deleted or moved element(s) resolved " + rows.Count + " clash(es); recorded.");
             }
             catch (Exception ex)
             {
@@ -507,6 +872,7 @@ namespace LiveClash.Core
             lock (PendingGate)
                 foreach (var p in Pending)
                     if (p.DocKey == fromKey) { p.DocKey = toKey; moved++; }
+            CommittedDeletions.Shared.Rekey(fromKey, toKey);   // the memory of committed deletions follows the document, merged into any already under the new key
             return moved;
         }
 
@@ -528,6 +894,48 @@ namespace LiveClash.Core
             lock (PendingGate)
                 for (int i = Pending.Count - 1; i >= 0; i--)
                     if (Pending[i].DocKey == docKey) { Pending.RemoveAt(i); dropped++; }
+            return dropped;
+        }
+
+        /// <summary>
+        /// Remove the queued MOVED fixes of the document whose pair key is among <paramref name="keys"/>: the pair was listed again in the same pass
+        /// (the reverse check), so it is not a fix. Queued deletions are not touched.
+        /// </summary>
+        /// <returns>How many fixes were removed.</returns>
+        public static int DropPendingMovedForKeys(string docKey, ICollection<string> keys)
+        {
+            if (string.IsNullOrEmpty(docKey) || keys == null || keys.Count == 0) return 0;
+            var wanted = new HashSet<string>(keys, StringComparer.Ordinal);
+            int dropped = 0;
+            lock (PendingGate)
+                for (int i = Pending.Count - 1; i >= 0; i--)
+                {
+                    var p = Pending[i];
+                    if (p.DocKey != docKey || !p.Moved || p.Row == null || p.Row.Key == null || !wanted.Contains(p.Row.Key)) continue;
+                    Pending.RemoveAt(i);
+                    dropped++;
+                }
+            return dropped;
+        }
+
+        /// <summary>
+        /// Forget the document's queued MOVED fixes (QueueMovedRow), the ones judged under rules that have just been replaced (delta review 3,
+        /// D3-1). A queued DELETION is kept, and marked: an element that is gone is a fix whatever the rules say, and the save should still record it.
+        /// If that element comes back (an undo) the entry leaves the queue unrecorded and unlisted instead of being re-tested under the new rules (DC-2).
+        /// </summary>
+        /// <returns>How many queued moved fixes were dropped.</returns>
+        public static int DropPendingMoved(string docKey)
+        {
+            if (string.IsNullOrEmpty(docKey)) return 0;
+
+            int dropped = 0;
+            lock (PendingGate)
+                for (int i = Pending.Count - 1; i >= 0; i--)
+                {
+                    if (Pending[i].DocKey != docKey) continue;
+                    if (Pending[i].Moved) { Pending.RemoveAt(i); dropped++; }
+                    else Pending[i].RulesReplaced = true;
+                }
             return dropped;
         }
 
@@ -610,10 +1018,18 @@ namespace LiveClash.Core
             // Fire on the UNION of every enabled set's source categories — the live
             // path checks a changed element against each set it belongs to, so the
             // trigger has to wake for any of them.
+            // And, when host-vs-host is on, of their TARGET categories (review N1). A target is edited too: a cable tray
+            // drawn through a pipe, or moved into one, must be checked against the sources near it, and a target moved
+            // clear must leave the panel. With only the source categories watched, Execute never ran for it and the
+            // pair was missed until a full check.
             var union = new System.Collections.Generic.HashSet<BuiltInCategory>();
             foreach (var set in ClashSettings.Current.Sets)
                 if (set.Enabled)
+                {
                     foreach (var c in set.SourceCategories) union.Add(c);
+                    if (ClashSettings.Current.CheckHostVsHost)
+                        foreach (var c in set.TargetCategories) union.Add(c);
+                }
             if (union.Count == 0) return;   // nothing to watch; leave triggers cleared
 
             var filter = new LogicalAndFilter(

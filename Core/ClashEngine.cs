@@ -145,7 +145,7 @@ namespace LiveClash.Core
         /// (one of two directions does the bare work), while the host insulation pass needs only this - the
         /// insulated element's own source-side pass tests everything its insulation touches, whatever the ids.
         /// </summary>
-        private static bool OtherSideCovers(Element el, Element other, ClashSettings s, ClashSet set)
+        internal static bool OtherSideCovers(Element el, Element other, ClashSettings s, ClashSet set)
         {
             try
             {
@@ -159,7 +159,12 @@ namespace LiveClash.Core
                 if (!set.TargetFilter.Matches(el)) return false;
                 if (ParameterFilter.TypeExcluded(el, s.AuditDrops)) return false;      // globally dropped: never a target
 
-                return true;
+                // ...and `el` must not be "ignorable": `other`'s pass drops an ignorable target however the set's
+                // categories read. Without this, ticking an insulation category as a target let a pipe's insulation
+                // pass (where `el` is the insulation) skip a pair "the other side covers" that the other side then
+                // dropped - reported by neither (review 2026-10-31, M6). An ignorable `other` needs no test: both
+                // callers drop it themselves. Last, so the cost is paid only when everything else said "covered".
+                return !PairSuppressor.IsIgnorableElement(el);
             }
             catch { return false; }   // never skip on doubt
         }
@@ -499,6 +504,195 @@ namespace LiveClash.Core
                 // Union what each set could not reach; idle re-runs them against all sets.
                 foreach (var id in setNotChecked)
                     if (ncSeen.Add(IdUtil.Value(id))) nc.Add(id);
+            }
+
+            return all;
+        }
+
+        /// <summary>
+        /// Can the reverse check of this set find nothing the forward check does not (review L3)? Only when its source and target categories are
+        /// EQUAL and neither parameter filter excludes anything: see ReverseCheckPolicy.
+        /// </summary>
+        internal static bool ReverseIsRedundant(ClashSet set)
+        {
+            if (set == null) return false;
+            var s = new List<int>();
+            foreach (var c in set.SourceCategories) s.Add((int)c);
+            var t = new List<int>();
+            foreach (var c in set.TargetCategories) t.Add((int)c);
+            return ReverseCheckPolicy.CanFindNothing(s, t, set.SourceFilter == null || set.SourceFilter.IsEmpty, set.TargetFilter == null || set.TargetFilter.IsEmpty);
+        }
+
+        /// <summary>
+        /// The source elements near a changed TARGET. Their bounding boxes do not include insulation, which is a separate element, so in an
+        /// insulation-aware set two more cases are reached (review M1): the target's OWN insulation widens its box, and a source reached only
+        /// through ITS insulation is found by querying the host insulation index around the target and taking each hit's owner.
+        /// </summary>
+        private static List<ElementId> ReverseCandidates(Document doc, ScanContext ctx, TargetIndex sources, ClashSet set, ClashSettings settings, Element target, BoundingBoxXYZ bare)
+        {
+            bool viaInsulation = set.InsulationAware;
+            var box = bare;
+            if (viaInsulation)
+            {
+                try
+                {
+                    foreach (var iid in PairVerifier.InsulationIdsOf(doc, target, ""))
+                    {
+                        var ib = doc.GetElement(iid) == null ? null : doc.GetElement(iid).get_BoundingBox(null);
+                        if (ib == null) continue;
+                        box = new BoundingBoxXYZ
+                        {
+                            Min = new XYZ(Math.Min(box.Min.X, ib.Min.X), Math.Min(box.Min.Y, ib.Min.Y), Math.Min(box.Min.Z, ib.Min.Z)),
+                            Max = new XYZ(Math.Max(box.Max.X, ib.Max.X), Math.Max(box.Max.Y, ib.Max.Y), Math.Max(box.Max.Z, ib.Max.Z))
+                        };
+                    }
+                }
+                catch (Exception ex) { Log.Warn("Could not read the insulation of target element " + IdUtil.Value(target.Id), ex); }
+            }
+
+            var outline = GeometryUtil.TransformToOutline(box, null, settings.ClearanceFor(set));
+            var near = new List<ElementId>(sources.Query(outline, target.Id));
+            if (!viaInsulation) return near;
+
+            var have = new HashSet<long>();
+            foreach (var n in near) have.Add(IdUtil.Value(n));
+            try
+            {
+                var insIndex = ctx.HostInsulationIndex(doc);
+                if (insIndex != null && insIndex.Count > 0)
+                {
+                    foreach (var hit in insIndex.Query(outline, null))
+                    {
+                        var ins = doc.GetElement(hit) as InsulationLiningBase;
+                        if (ins == null || !ins.IsValidObject) continue;
+                        var ownerId = ins.HostElementId;
+                        if (ownerId == null || IdUtil.Value(ownerId) == IdUtil.Value(target.Id) || !have.Add(IdUtil.Value(ownerId))) continue;
+                        var owner = doc.GetElement(ownerId);
+                        if (owner == null || !owner.IsValidObject) continue;
+                        if (!set.SourceCategories.Contains(PairSuppressor.GetBuiltInCategory(owner))) continue;
+                        near.Add(ownerId);
+                    }
+                }
+            }
+            catch (Exception ex) { Log.Warn("Could not query the host insulation around target element " + IdUtil.Value(target.Id), ex); }
+            return near;
+        }
+
+        /// <summary>
+        /// The REVERSE of <see cref="CheckElementsAllSets"/>: for each changed or added element that is a TARGET of
+        /// an enabled set, check it against the SOURCE elements near it (review N1: the live updater used to watch
+        /// only source categories, so a cable tray drawn through a pipe, or moved into one, was never checked until a
+        /// full check).
+        ///
+        /// HOW. The set's sources near the target come from the source spatial index the cached context holds
+        /// (<see cref="ScanContext.HostSourceIndex"/>). Each is then checked by the engine's OWN source-side check
+        /// (<see cref="CheckElements"/>) against a context that holds just this one target, so every rule applies
+        /// unchanged - suppression of connected pairs, hosted elements, clearance, insulation, drops - and the rows
+        /// are keyed exactly as a source-side hit would be (host = the source element, other = the target).
+        ///
+        /// NO DUPLICATES. A source is skipped when the target, as a source, already examines it as a target
+        /// (<see cref="OtherSideCovers"/>, the rule the full sweep uses), and when it is itself among the changed ids
+        /// (it is checked as a source in the same pass). Rows merge by key.
+        ///
+        /// BUDGET. Shares <paramref name="budget"/>. A target it cannot finish inside it comes back in
+        /// <paramref name="notChecked"/> for the deferred queue, re-run the same way. With
+        /// <paramref name="finishFirst"/> (the idle drain) the first target of the call is always finished whatever the
+        /// clock says, so a target with many sources near it cannot be queued again for ever. A target whose check
+        /// THROWS is logged, not queued again.
+        /// </summary>
+        public static List<ClashResult> CheckTargetsAllSets(
+            Document doc, ICollection<ElementId> ids, ClashSettings settings,
+            Stopwatch budget, bool finishFirst, out List<ElementId> notChecked)
+        {
+            var all = new List<ClashResult>();
+            var nc = new List<ElementId>();
+            notChecked = nc;
+            if (doc == null || !doc.IsValidObject || ids == null || ids.Count == 0 || settings == null) return all;
+            if (!settings.CheckHostVsHost) return all;
+
+            var changed = new HashSet<long>();
+            foreach (var id in ids) if (id != null) changed.Add(IdUtil.Value(id));
+
+            var seen = new Dictionary<string, int>(StringComparer.Ordinal);
+            var ncSeen = new HashSet<long>();
+            // finishFirst: ONE target of the call is finished whatever the clock says, so progress is certain. It is the first
+            // target that has something to check, not the first that passes the filters (one with nothing near it spends
+            // nothing), and it keeps the allowance in every set (so a target with work in two sets is not queued again by
+            // the second). Per call and not per set: N sets would otherwise run N unbounded targets in one idle slice.
+            bool haveFinisher = false;
+            long finisher = 0;
+
+            foreach (var set in settings.Sets)
+            {
+                if (!set.Enabled) continue;
+                if (set.SourceCategories.Count == 0 || set.TargetCategories.Count == 0) continue;
+
+                // Nothing the forward check of the changed element does not reach: no second index, no pass (review L3).
+                if (ReverseIsRedundant(set)) continue;
+
+                var ctx = ClashContext.GetContext(doc, settings, set);
+                var sources = ctx.HostSourceIndex(doc, set.SourceCategories);
+                if (sources == null) continue;   // the collection failed and was logged: nothing to check against
+
+                foreach (var id in ids)
+                {
+                    if (id == null) continue;
+                    long idValue = IdUtil.Value(id);
+                    bool unbounded = finishFirst && (!haveFinisher || finisher == idValue);
+
+                    try
+                    {
+                        // The element tests come BEFORE the budget test: an id that is not a target of this set (a source whose forward check already
+                        // finished in this pass) must not be queued again just because the clock ran out (review L1).
+                        Element el;
+                        try { el = doc.GetElement(id); } catch { continue; }
+                        if (el == null || !el.IsValidObject) continue;
+                        if (!set.TargetCategories.Contains(PairSuppressor.GetBuiltInCategory(el))) continue;
+                        if (PairSuppressor.IsIgnorableElement(el)) continue;
+                        if (!set.TargetFilter.Matches(el)) continue;
+                        if (ParameterFilter.TypeExcluded(el, settings.AuditDrops)) continue;
+
+                        if (!unbounded && budget != null && settings.TimeBudgetMs > 0 && budget.ElapsedMilliseconds > settings.TimeBudgetMs)
+                        {
+                            if (ncSeen.Add(idValue)) nc.Add(id);
+                            continue;
+                        }
+
+                        BoundingBoxXYZ box;
+                        try { box = el.get_BoundingBox(null); } catch { continue; }
+                        if (box == null) continue;
+
+                        var near = ReverseCandidates(doc, ctx, sources, set, settings, el, box);
+                        var toCheck = new List<ElementId>();
+                        foreach (var sid in near)
+                        {
+                            if (changed.Contains(IdUtil.Value(sid))) continue;
+                            Element s;
+                            try { s = doc.GetElement(sid); } catch { continue; }
+                            if (s == null || !s.IsValidObject || PairSuppressor.IsIgnorableElement(s)) continue;
+                            if (OtherSideCovers(s, el, settings, set)) continue;   // the target's own source-side check reaches it
+                            toCheck.Add(sid);
+                        }
+
+                        if (toCheck.Count == 0) continue;
+                        bool bounded = !unbounded;
+                        if (unbounded) { haveFinisher = true; finisher = idValue; }   // the first target WITH WORK is the one finished whatever the clock says
+
+                        var one = ctx.ForSingleTarget(doc, id, set.InsulationAware);
+                        List<ElementId> sourcesNotChecked;
+                        foreach (var r in CheckElements(doc, toCheck, settings, bounded ? budget : null, one, out sourcesNotChecked, set))
+                            if (r.LinkInstanceId == null && r.OtherElementId != null && IdUtil.Value(r.OtherElementId) == idValue)
+                                AddDeduped(all, seen, r, set.Name);
+
+                        if (bounded && sourcesNotChecked.Count > 0 && ncSeen.Add(idValue)) nc.Add(id);
+                    }
+                    catch (Exception ex)
+                    {
+                        // Not queued again: a check that always throws for one element would be re-run for ever. Logged, as
+                        // the source-side loop logs an element it could not check; a full check re-examines it.
+                        Log.Warn("Reverse check failed for target element " + idValue.ToString(System.Globalization.CultureInfo.InvariantCulture), ex);
+                    }
+                }
             }
 
             return all;

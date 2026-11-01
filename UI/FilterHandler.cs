@@ -93,7 +93,14 @@ namespace LiveClash.UI
                              + s.TargetCategories.Count + " target categories.");
                 }
 
-                s.Save();
+                bool saved = s.Save();
+                var notSaved = SaveNotice.After(saved, s.IsSuperseded);   // DL-e: a refused save is said, not hidden
+                if (notSaved != null && s.IsSuperseded)
+                {
+                    // The edits went into the defaults a re-read replaced: nothing was applied, so nothing else changes.
+                    if (Panel != null) Panel.SetStatus(notSaved);
+                    return;
+                }
 
                 // We are in API context, so this can be done directly rather than
                 // deferred to Idling.
@@ -108,7 +115,7 @@ namespace LiveClash.UI
 
                 // Results found under the old filter are not necessarily valid under
                 // the new one.
-                ClashResultStore.Instance.Clear();
+                LiveClashApp.ClearResultsForNewRules();   // the list and the held link rows (delta review 3, D3-2)
 
                 // Say WHY the list just emptied, where the rows were - the status line
                 // below scrolls away and this is the exact moment people conclude live
@@ -122,7 +129,7 @@ namespace LiveClash.UI
                     try { Panel.UpdateScopeIndicator(ClashScopeEstimate.Measure(doc, s)); }
                     catch (System.Exception ex) { Log.Warn("Scope indicator update failed", ex); }
 
-                    Panel.SetStatus("Filter updated — "
+                    Panel.SetStatus((notSaved == null ? "" : notSaved + " ") + "Filter updated — "
                         + s.SourceCategories.Count + " source / " + s.TargetCategories.Count + " target categories"
                         + "  ·  sources: " + s.SourceFilter.Summary() + ", targets: " + s.TargetFilter.Summary()
                         + ". Run a full check or Recheck to re-evaluate.");

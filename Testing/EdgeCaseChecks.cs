@@ -27,9 +27,9 @@ namespace LiveClash.Testing
         // Fixed inputs as fields rather than array literals at the call (static analysis rule CA1861).
         private static readonly string[] SerializedExpected =
         {
-            "skw=k/1", "sxkw=", "sparam=Type|Sys/Type", "spick=Either|P/1|v/1", "sxpick=Instance|X|x/1", "sonly=Either|O|",
-            "srule=0|Either|IsEmpty|R/1|", "srule=1|Either|Is|R2|", "srule=2|Either|Contains|R3|a/b", "srule=2|Either|Contains|R3|",
-            "sgroup=0|And", "sgrule=0|0|Either|IsNotEmpty|G/1|", "sgrule=0|1|Either|Is|G2|v/2"
+            "skw=k/1", "sxkw=", "sparam=Type|Sys/Type", "spick=Either|P/1|v|1", "sxpick=Instance|X|x|1", "sonly=Either|O|",
+            "srule=0|Either|IsEmpty|R/1|", "srule=1|Either|Is|R2|", "srule=2|Either|Contains|R3|a|b", "srule=2|Either|Contains|R3|",
+            "sgroup=0|And", "sgrule=0|0|Either|IsNotEmpty|G/1|", "sgrule=0|1|Either|Is|G2|v|2"
         };
         private static readonly string[] OneJunkLine = { "x" };
         private static readonly string[] ZonelessFields = { "Z", "2026-09-08T10:00:00", "u", "1", "h", "c", "2", "o", "d", "m" };
@@ -157,7 +157,7 @@ namespace LiveClash.Testing
             w.Rules.Add(new Rule { ParameterName = "R3", Op = RuleOp.Contains, Values = { "a|b", null } });
             w.Groups.Add(new RuleGroup { Join = RuleJoin.And, Rules = { new Rule { ParameterName = "G|1", Op = RuleOp.IsNotEmpty, Values = { "z" } }, new Rule { ParameterName = "G2", Op = RuleOp.Is, Values = { "v|2" } } } });
             var lines = string.Join("\n", w.Serialize("s"));
-            check(P + "filter file: Serialize writes each kind exactly, escaping '|' to '/' and writing one line per value",
+            check(P + "filter file: Serialize writes each kind exactly, escaping '|' to '/' in names but keeping it in values (the last field; review LOW-4), one line per value",
                 lines == string.Join("\n", SerializedExpected));
         }
 

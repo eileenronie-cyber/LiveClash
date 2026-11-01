@@ -61,6 +61,27 @@
     <Compile Include="..\..\Testing\LogChecks.cs" Link="Shared\LogChecks.cs" />
     <Compile Include="..\..\Testing\FuzzChecks.cs" Link="Shared\FuzzChecks.cs" />
     <Compile Include="..\..\Testing\EdgeCaseChecks.cs" Link="Shared\EdgeCaseChecks.cs" />
+    <Compile Include="..\..\Testing\ReviewChecks.LivePath.Shared.cs" Link="Shared\ReviewChecks.LivePath.Shared.cs" />
+    <Compile Include="..\..\Testing\ReviewChecks.FullCheck.Logic.cs" Link="Shared\ReviewChecks.FullCheck.Logic.cs" />
+    <Compile Include="..\..\Testing\LedgerReviewChecks.cs" Link="Shared\LedgerReviewChecks.cs" />
+    <Compile Include="..\..\Testing\LedgerReviewR2Checks.cs" Link="Shared\LedgerReviewR2Checks.cs" />
+    <Compile Include="..\..\Testing\LedgerReviewR3Checks.cs" Link="Shared\LedgerReviewR3Checks.cs" />
+    <Compile Include="..\..\Testing\FolderSnapshot.cs" Link="Shared\FolderSnapshot.cs" />
+    <Compile Include="..\..\Testing\LedgerReviewR4Checks.cs" Link="Shared\LedgerReviewR4Checks.cs" />
+    <Compile Include="..\..\Testing\LedgerReviewR8FilesChecks.cs" Link="Shared\LedgerReviewR8FilesChecks.cs" />
+    <Compile Include="..\..\Testing\UiOutcomeChecks.cs" Link="Shared\UiOutcomeChecks.cs" />
+    <Compile Include="..\..\Testing\ReviewChecks.SessionHandlers.Logic.cs" Link="Shared\ReviewChecks.SessionHandlers.Logic.cs" />
+    <Compile Include="..\..\Testing\OpenGroupLedger.cs" Link="Shared\OpenGroupLedger.cs" />
+    <Compile Include="..\..\Testing\ReviewChecks.GroupLedger.cs" Link="Shared\ReviewChecks.GroupLedger.cs" />
+    <Compile Include="..\..\Testing\R8LiveChecks.cs" Link="Shared\R8LiveChecks.cs" />
+    <Compile Include="..\..\Testing\R8LiveChecks.Sched.cs" Link="Shared\R8LiveChecks.Sched.cs" />
+    <Compile Include="..\..\Testing\R8LiveChecks.Probes.cs" Link="Shared\R8LiveChecks.Probes.cs" />
+    <Compile Include="..\..\Testing\R8LiveChecks.R2.cs" Link="Shared\R8LiveChecks.R2.cs" />
+    <Compile Include="..\..\Testing\R8LiveChecks.R3.cs" Link="Shared\R8LiveChecks.R3.cs" />
+    <Compile Include="..\..\Testing\R8LiveChecks.R4.cs" Link="Shared\R8LiveChecks.R4.cs" />
+    <Compile Include="..\..\Testing\R8LiveChecks.R5.cs" Link="Shared\R8LiveChecks.R5.cs" />
+    <Compile Include="..\..\Testing\R8LiveChecks.R6.cs" Link="Shared\R8LiveChecks.R6.cs" />
+    <Compile Include="..\..\Testing\R8LiveChecks.R7.cs" Link="Shared\R8LiveChecks.R7.cs" />
   </ItemGroup>
 
 </Project>

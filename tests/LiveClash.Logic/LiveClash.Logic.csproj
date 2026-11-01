@@ -74,6 +74,36 @@
     <!-- The export stamp and the CSV quoting rule: pure, no Revit. -->
     <Compile Include="..\..\Core\CsvText.cs" Link="Core\CsvText.cs" />
     <Compile Include="..\..\Core\CsvStamp.cs" Link="Core\CsvStamp.cs" />
+    <!-- Which document the live and idle paths may act on: pure. -->
+    <Compile Include="..\..\Core\SessionGuard.cs" Link="Core\SessionGuard.cs" />
+    <!-- The link pairs held while their instance is deleted, for an undo to bring back (pure; its Revit half is not linked). -->
+    <Compile Include="..\..\Core\DroppedLinkRows.cs" Link="Core\DroppedLinkRows.cs" />
+    <!-- The idle tick's order as data, and the time-boxed slice (round 8): pure. -->
+    <Compile Include="..\..\Core\IdleSchedule.cs" Link="Core\IdleSchedule.cs" />
+    <Compile Include="..\..\Core\SliceBudget.cs" Link="Core\SliceBudget.cs" />
+    <Compile Include="..\..\Core\WarnThrottle.cs" Link="Core\WarnThrottle.cs" />
+    <Compile Include="..\..\Core\UndoPolicy.cs" Link="Core\UndoPolicy.cs" />
+    <Compile Include="..\..\Core\CommittedDeletions.cs" Link="Core\CommittedDeletions.cs" />
+    <Compile Include="..\..\Core\CloseTracker.cs" Link="Core\CloseTracker.cs" />
+    <Compile Include="..\..\Core\ReverseCheckPolicy.cs" Link="Core\ReverseCheckPolicy.cs" />
+    <Compile Include="..\..\Core\LedgerProvenance.cs" Link="Core\LedgerProvenance.cs" />
+    <Compile Include="..\..\Core\SaveNotice.cs" Link="Core\SaveNotice.cs" />
+    <Compile Include="..\..\Core\SaveAsCarry.cs" Link="Core\SaveAsCarry.cs" />
+    <Compile Include="..\..\Core\NoticeHolder.cs" Link="Core\NoticeHolder.cs" />
+    <Compile Include="..\..\Core\ScratchFolder.cs" Link="Core\ScratchFolder.cs" />
+    <!-- The full check's missing-pair sorting, the panel summaries, and the verifier's verdict rules
+         (review 2026-10-31, F2): pure, no Revit. -->
+    <Compile Include="..\..\Core\CheckOutcome.cs" Link="Core\CheckOutcome.cs" />
+    <Compile Include="..\..\Core\PairVerifier.Verdicts.cs" Link="Core\PairVerifier.Verdicts.cs" />
+    <!-- Review F3 (2026-10-31): the shared disk rules for the ledgers and the whole-file stores, and the
+         pure half of the rules fingerprint. -->
+    <Compile Include="..\..\Core\LedgerFile.cs" Link="Core\LedgerFile.cs" />
+    <Compile Include="..\..\Core\RetryBackoff.cs" Link="Core\RetryBackoff.cs" />
+    <Compile Include="..\..\Core\FilterFormat.cs" Link="Core\FilterFormat.cs" />
+    <Compile Include="..\..\Core\RewrittenFile.cs" Link="Core\RewrittenFile.cs" />
+    <Compile Include="..\..\Core\RulesFingerprint.Lines.cs" Link="Core\RulesFingerprint.Lines.cs" />
+    <!-- What Focus says it did (review 2026-10-31, M7): pure wording. -->
+    <Compile Include="..\..\Core\FocusOutcome.cs" Link="Core\FocusOutcome.cs" />
   </ItemGroup>
 
 </Project>

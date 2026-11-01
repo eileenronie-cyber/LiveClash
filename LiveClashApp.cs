@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Reflection;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
@@ -40,10 +41,15 @@ namespace LiveClash
                 // We are in API context here, so ExternalEvents can be created.
                 ClashPaneProvider.Panel.InitialiseEvents();
 
+                // The early follow after a refused Save As carry (an API context, like the panel's events).
+                try { _followEvent = ExternalEvent.Create(new FollowHandler()); }
+                catch (Exception ex) { Log.Warn("Could not create the follow event", ex); }
+
                 ClashUpdater.Register(AddInId);
 
                 application.Idling += OnIdling;
                 application.ControlledApplication.DocumentClosing += OnDocumentClosing;
+                application.ControlledApplication.DocumentClosed += OnDocumentClosed;
                 application.ControlledApplication.DocumentOpened += OnDocumentOpened;
                 application.ControlledApplication.DocumentChanged += OnDocumentChanged;
                 application.ViewActivated += OnViewActivated;
@@ -94,6 +100,7 @@ namespace LiveClash
             {
                 application.Idling -= OnIdling;
                 application.ControlledApplication.DocumentClosing -= OnDocumentClosing;
+                application.ControlledApplication.DocumentClosed -= OnDocumentClosed;
                 application.ControlledApplication.DocumentOpened -= OnDocumentOpened;
                 application.ControlledApplication.DocumentChanged -= OnDocumentChanged;
                 application.ControlledApplication.LinkedResourceOpened -= OnLinkedResourceOpened;
@@ -214,53 +221,214 @@ namespace LiveClash
         // ------------------------------------------------------------------ idling
 
         /// <summary>
+        /// The results of the session document are being thrown away because the RULES changed (the filter, the clearance, the audit drops, a
+        /// settings re-read): the list is cleared and the document's held link rows are let go with it (delta review 3, D3-2).
+        /// </summary>
+        internal static void ClearResultsForNewRules()
+        {
+            ClashResultStore.Instance.ClearForNewRules(_adoptedDocKey);
+        }
+
+        /// <summary>
+        /// The settings were read again mid-session (the file was unreadable at open, and a retry has now swapped the defaults for the model's
+        /// own settings). The rules in force changed under the listed clashes, so this does what a Filter change does (FilterHandler): the warm
+        /// scan contexts go, the result store is cleared and the panel says why. Without it a clearance-only clash found under the defaults is
+        /// re-tested under the real rules, called Resolved and recorded as fixed with no change to the model, and a clash only the real scope finds
+        /// stays unlisted while the notice reads as all clear (delta review round 2, DM4). Called from OnIdling, which is a safe API context;
+        /// the getter that did the swap can run inside the updater and so only raises the flag. Returns whether it acted.
+        /// </summary>
+        internal static bool HandlePendingRulesReload()
+        {
+            if (!ClashSettings.TakeRulesReloaded()) return false;
+            try
+            {
+                ClashEngine.InvalidateAll();
+                ClearResultsForNewRules();   // the list and the held link rows
+                int dropped = ClashUpdater.DropPendingMoved(_adoptedDocKey);   // moved fixes judged under the old rules would be recorded as fixes of the new (a deletion is kept)
+                ClashChangeTracker.Reset();   // a baseline taken under the old rules would report their difference as a link's
+                var panel = UI.ClashPaneProvider.Panel;
+                if (panel != null)
+                {
+                    panel.SyncToSettings();
+                    panel.SetEmptyReason(UI.ClashPanel.EmptyReason.FilterChanged);
+                    panel.SetStatus("Your settings were read again, so the rules changed and the list was cleared. Run a full check.");
+                }
+                Log.Info("Settings re-read mid-session: results cleared like a filter change" + (dropped > 0 ? ", " + dropped + " queued fix(es) dropped" : "") + "; a full check is needed.");
+            }
+            catch (Exception ex) { Log.Warn("Resetting the results after a settings re-read failed", ex); }
+            return true;
+        }
+
+        /// <summary>
+        /// The top of an idle tick: read the settings (a retry that is due swaps the rules here) and reset the results if they changed. A throw from
+        /// the retry (a file read, a parse) is logged and the tick carries on: it sat outside any try and would have left the Idling event, as the
+        /// guard in HandlerGuard.SettingsReloaded would have let it leave a panel button (delta check of DR4).
+        /// </summary>
+        internal static void RetrySettingsAndReset()
+        {
+            try { ClashSettings.RetryUnreadable(); }
+            catch (Exception ex) { Log.Warn("The settings retry failed on an idle tick; carrying on", ex); }
+            HandlePendingRulesReload();
+        }
+
+        /// <summary>
         /// Drains the deferred queue in small slices while Revit has nothing else to do.
         /// This is what keeps a 5000-element paste from freezing the session.
         /// </summary>
         private void OnIdling(object sender, IdlingEventArgs e)
         {
-            // Safe API context — do any pending trigger rebuild here, not in the dialog.
-            ClashUpdater.RebuildTriggersIfRequested();
+            if (RunIdleTick(sender as UIApplication)) e.SetRaiseWithoutDelay();
+        }
 
-            // Build the index before the user's first edit has to.
-            TryWarmIndex(sender as UIApplication);
+        [Conditional("DEV")]
+        private static void Trace(string step)
+        {
+        }
 
-            // Refresh a per-set context BEFORE its 10-minute TTL lapses, so the next live edit
-            // never has to pay for the rebuild inside its own transaction. Same reasoning as
-            // TryWarmIndex just above; see ClashContext.RefreshStaleSoon.
-            TryRefreshContexts(sender as UIApplication);
+        /// <summary>
+        /// One idle tick, split out of OnIdling (an event handler cannot be called with a made-up IdlingEventArgs) so the in-Revit
+        /// checks can run it. Returns whether Idling should be raised again at once. The steps and their ORDER are IdleSchedule.Order (pinned by
+        /// the headless checks IS-1 and IS-2). Each step is guarded on its own: a throw (a settings read that fails, a document that cannot be
+        /// read) is logged and the tick carries on with the next step, so nothing leaves the Idling event (D3-6, N2).
+        /// </summary>
+        internal static bool RunIdleTick(UIApplication uiapp)
+        {
+            bool raiseAgain = false;
+            foreach (var step in IdleSchedule.Order)
+            {
+                Trace(step.ToString());
+                try { if (RunIdleStep(step, uiapp)) raiseAgain = true; }
+                catch (Exception ex)
+                {
+                    // A step that keeps throwing would log a stack every tick, and ticks can be raised without delay (delta review I-2).
+                    int held;
+                    if (IdleWarnings.ShouldLog(step.ToString(), DateTime.UtcNow, out held))
+                        Log.Warn("Idle step " + step + " failed; carrying on with the tick" + (held > 0 ? " (" + held + " more failures since the last line)" : ""), ex);
+                }
+            }
+            return raiseAgain;
+        }
 
-            // Left to Revit's own cadence, Idling fires about every 2.5 seconds, so
-            // 25 ms slices counted 19,000 elements a minute and would have taken
-            // eleven minutes on this model. Asking to be raised again immediately —
-            // the same thing the deferred queue does below — turns that into seconds.
-            // Revit still pumps its message loop between raises, so the UI stays live.
-            if (!TryWarmCounts(sender as UIApplication)) e.SetRaiseWithoutDelay();
+        private static readonly WarnThrottle IdleWarnings = new WarnThrottle(60);
 
-            // Once the counts are warm, show the full-check cost hint on the panel.
-            TryShowScope(sender as UIApplication);
+        /// <summary>One step of the idle tick. Returns whether Idling should be raised again at once.</summary>
+        private static bool RunIdleStep(IdleStep step, UIApplication uiapp)
+        {
+            switch (step)
+            {
+                case IdleStep.FollowPath:
+                    {
+                        // The active document's path may have moved under the session (a Detach): follow it before anything else acts (fix B).
+                        var uidoc = uiapp == null ? null : uiapp.ActiveUIDocument;
+                        if (uidoc != null) FollowPathChange(uidoc.Document);
+                        _followRequested = false;   // this tick's follow served a pending request, if there was one
+                        return false;
+                    }
 
-            // Re-verify a slice of the existing results even while Live is paused:
-            // a clash resolved during a pause should still stop being listed.
-            TryVerifySlice(sender as UIApplication);
+                case IdleStep.Triggers:
+                    // Safe API context — do any pending trigger rebuild here, not in the dialog.
+                    ClashUpdater.RebuildTriggersIfRequested();
+                    return false;
 
-            if (!ClashSettings.Current.Enabled) return;
-            if (DeferredQueue.PendingCount == 0) return;
+                case IdleStep.SettingsReset:
+                    // The settings were re-read mid-session (DM4, D3-1). The retry runs when the settings are first READ, so read them first: the
+                    // swap happens here, at the top of the tick, and the reset follows before anything re-tests a row under the new rules. Read
+                    // later (the context refresh, the verify slice) it swapped them after the reset and the old rows were judged under the new
+                    // rules in the same tick.
+                    RetrySettingsAndReset();
+                    return false;
+
+                case IdleStep.WarmIndex:
+                    // Build the index before the user's first edit has to.
+                    TryWarmIndex(uiapp);
+                    return false;
+
+                case IdleStep.RefreshContexts:
+                    // Refresh a per-set context BEFORE its 10-minute TTL lapses, so the next live edit never has to pay for the rebuild inside
+                    // its own transaction. Same reasoning as TryWarmIndex just above; see ClashContext.RefreshStaleSoon.
+                    TryRefreshContexts(uiapp);
+                    return false;
+
+                case IdleStep.WarmCounts:
+                    // Left to Revit's own cadence, Idling fires about every 2.5 seconds, so 25 ms slices counted 19,000 elements a minute and would
+                    // have taken eleven minutes on this model. Asking to be raised again immediately turns that into seconds. Revit still pumps its
+                    // message loop between raises, so the UI stays live.
+                    return !TryWarmCounts(uiapp);
+
+                case IdleStep.ShowScope:
+                    // Once the counts are warm, show the full-check cost hint on the panel.
+                    TryShowScope(uiapp);
+                    return false;
+
+                case IdleStep.VerifySlice:
+                    // Re-verify a slice of the existing results even while Live is paused: a clash resolved during a pause should still stop being
+                    // listed.
+                    TryVerifySlice(uiapp);
+                    return DrainReconcileBacklog(uiapp);
+
+                case IdleStep.Drain:
+                    return DrainStep(uiapp);
+
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>
+        /// After a rollback pass that stopped by time, the queued fixes it did not reach are asked again here, one time-boxed slice per tick
+        /// (at most ReconcilePlan.TickMaxItems entries and TickBudgetMs ms), WITHOUT waiting for the verify interval, and Idling is asked to come
+        /// straight back while any are left (delta review L-3). Each slice is as short as before; only the wait between slices goes, so the
+        /// rows a rolled-back move took off the panel are back in seconds, not minutes. True when more is waiting.
+        /// </summary>
+        internal static bool DrainReconcileBacklog(UIApplication uiapp)
+        {
+            if (HandlePendingRulesReload()) return false;   // like VerifySliceFor: a swap that landed after the tick's reset step must be reset before queued fixes are asked under the new rules (R2-7)
+            var uidoc = uiapp == null ? null : uiapp.ActiveUIDocument;
+            if (uidoc == null) return false;
+            var doc = uidoc.Document;
+            if (!IsSessionDocument(doc)) return false;
+            if (!ClashUpdater.ReconcileBacklogRemains(doc)) return false;
+
+            ClashUpdater.ReconcilePendingSlice(doc, ReconcilePlan.TickMaxItems, ReconcilePlan.TickBudgetMs, "tick");
+            return ClashUpdater.ReconcileBacklogRemains(doc);
+        }
+
+        /// <summary>The deferred queue's slice. True when more is waiting and Idling should come straight back.</summary>
+        private static bool DrainStep(UIApplication uiapp)
+        {
+            if (!ClashSettings.Current.Enabled) return false;
+            if (DeferredQueue.PendingCount == 0) return false;
 
             try
             {
-                var uiapp = sender as UIApplication;
-                if (uiapp == null) return;
+                if (uiapp == null) return false;
 
                 var uidoc = uiapp.ActiveUIDocument;
-                if (uidoc == null) return;
+                if (uidoc == null) return false;
 
-                var doc = uidoc.Document;
-                if (doc == null || !doc.IsValidObject) return;
+                // Come straight back if there is more waiting.
+                return DrainDeferredSliceFor(uidoc.Document);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("Idle processing failed", ex);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// One slice of the deferred queue for <paramref name="doc"/>. Split out of OnIdling so the
+        /// in-Revit checks can hand it a document directly. Returns true when more is waiting.
+        /// </summary>
+        internal static bool DrainDeferredSliceFor(Document doc)
+        {
+            // Only the session's own document: its queue is the one the store's rows came from (H1).
+            if (!IsSessionDocument(doc)) return false;
+            {
 
                 const int sliceSize = 25;
                 var slice = DeferredQueue.Dequeue(doc, sliceSize);
-                if (slice.Count == 0) return;
+                if (slice.Count == 0) return false;
 
                 var sw = Stopwatch.StartNew();
                 List<ElementId> notChecked;
@@ -275,19 +443,29 @@ namespace LiveClash
                 {
                     var results = ClashEngine.CheckElementsAllSets(doc, slice, settings, sw, out notChecked);
                     ClashResultStore.Instance.AddRange(results);
+
+                    // What the forward pass could not finish is queued again FIRST (review L2): the reverse check below may throw.
                     if (notChecked.Count > 0) DeferredQueue.Enqueue(doc, notChecked);
+
+                    // The reverse check for any TARGET in the slice (review N1), with the first target always finished so
+                    // one with many sources near it cannot be queued again for ever. In its own try (L2); a pair it lists is
+                    // not a fix, so a moved fix queued for the same key leaves the queue (L6).
+                    try
+                    {
+                        List<ElementId> notCheckedTargets;
+                        var targetRows = ClashEngine.CheckTargetsAllSets(doc, slice, settings, sw, true, out notCheckedTargets);
+                        ClashResultStore.Instance.AddRange(targetRows);
+                        ClashUpdater.DropPendingMovedForKeys(ClashEngine.DocKey(doc), targetRows.Where(r => r != null && r.Key != null).Select(r => r.Key).ToList());
+                        if (notCheckedTargets.Count > 0) DeferredQueue.Enqueue(doc, notCheckedTargets);
+                    }
+                    catch (Exception ex) { Log.Warn("The reverse check failed on an idle slice; the forward pass is unaffected", ex); }
                 }
                 finally
                 {
                     settings.TimeBudgetMs = saved;
                 }
 
-                // Come straight back if there is more waiting.
-                if (DeferredQueue.PendingCount > 0) e.SetRaiseWithoutDelay();
-            }
-            catch (Exception ex)
-            {
-                Log.Warn("Idle processing failed", ex);
+                return DeferredQueue.PendingCount > 0;
             }
         }
 
@@ -310,7 +488,7 @@ namespace LiveClash
         /// while the user is still orienting, and makes the first edit as fast as the
         /// hundredth.
         /// </summary>
-        private void TryWarmIndex(UIApplication uiapp)
+        private static void TryWarmIndex(UIApplication uiapp)
         {
             if (!_warmPending) return;
 
@@ -320,7 +498,7 @@ namespace LiveClash
                 var uidoc = uiapp.ActiveUIDocument;
                 if (uidoc == null) return;
                 var doc = uidoc.Document;
-                if (doc == null || !doc.IsValidObject) return;
+                if (!IsSessionDocument(doc)) return;   // a family being edited waits; the project is warmed when it is back
 
                 _warmPending = false;
 
@@ -358,16 +536,16 @@ namespace LiveClash
         /// path — see ClashContext.RefreshStaleSoon for why the TTL needs this. Cheap when
         /// nothing is close to expiring: one age check per enabled set, no document read.
         /// </summary>
-        private void TryRefreshContexts(UIApplication uiapp)
+        private static void TryRefreshContexts(UIApplication uiapp)
         {
-            if (!ClashSettings.Current.Enabled) return;
             try
             {
+                if (!ClashSettings.Current.Enabled) return;   // inside the try: a settings read that throws must not leave the idle handler (D3-6, N2)
                 if (uiapp == null) return;
                 var uidoc = uiapp.ActiveUIDocument;
                 if (uidoc == null) return;
                 var doc = uidoc.Document;
-                if (doc == null || !doc.IsValidObject) return;
+                if (!IsSessionDocument(doc)) return;
 
                 ClashContext.RefreshStaleSoon(doc, ClashSettings.Current);
             }
@@ -388,7 +566,7 @@ namespace LiveClash
         private static bool _countsWarm;
 
         /// <returns>True when there is nothing left to count.</returns>
-        private bool TryWarmCounts(UIApplication uiapp)
+        private static bool TryWarmCounts(UIApplication uiapp)
         {
             if (_countsWarm) return true;
             if (_warmPending) return false;           // index first, it matters more
@@ -400,6 +578,7 @@ namespace LiveClash
                 if (uidoc == null) return false;
                 var doc = uidoc.Document;
                 if (doc == null || !doc.IsValidObject) return false;
+                if (!IsSessionDocument(doc)) return true;   // not now: counted when the session's model is back, without spinning Idling
 
                 // Smaller slices now that they arrive back to back, so Revit keeps
                 // a decent share of each cycle for itself.
@@ -421,14 +600,14 @@ namespace LiveClash
         /// </summary>
         private static bool _scopeShown;
 
-        private void TryShowScope(UIApplication uiapp)
+        private static void TryShowScope(UIApplication uiapp)
         {
             if (_scopeShown || !_countsWarm) return;
             try
             {
                 var uidoc = uiapp != null ? uiapp.ActiveUIDocument : null;
                 var doc = uidoc != null ? uidoc.Document : null;
-                if (doc == null || !doc.IsValidObject) return;
+                if (!IsSessionDocument(doc)) return;
 
                 var panel = ClashPaneProvider.Panel;
                 if (panel == null) return;
@@ -475,9 +654,11 @@ namespace LiveClash
         /// kept, because silently dropping real coordination issues is far worse than
         /// briefly listing a stale one.
         /// </summary>
-        private void TryVerifySlice(UIApplication uiapp)
+        private static void TryVerifySlice(UIApplication uiapp)
         {
-            var s = ClashSettings.Current;
+            ClashSettings s;
+            try { s = ClashSettings.Current; }
+            catch (Exception ex) { Log.Warn("Auto-verify could not read the settings", ex); return; }   // D3-6, N2
 
             // The interval gate comes BEFORE the AutoVerify switch, because this pass
             // also refreshes the status store's record of the document — which has to
@@ -489,13 +670,42 @@ namespace LiveClash
                 if (uiapp == null) return;
                 var uidoc = uiapp.ActiveUIDocument;
                 if (uidoc == null) return;
-                var doc = uidoc.Document;
-                if (doc == null || !doc.IsValidObject) return;
+                VerifySliceFor(uidoc.Document);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("Auto-verify failed", ex);
+            }
+        }
+
+        /// <summary>
+        /// One auto-verify slice against <paramref name="doc"/>, past the interval gate. Split out of
+        /// TryVerifySlice so the in-Revit checks can hand it a document directly.
+        /// </summary>
+        internal static void VerifySliceFor(Document doc)
+        {
+            ClashSettings s;
+            try { s = ClashSettings.Current; }
+            catch (Exception ex) { Log.Warn("Auto-verify could not read the settings", ex); return; }   // D3-6
+            if (HandlePendingRulesReload()) return;   // the read above may have swapped the rules: reset before any row is re-tested under them (D3-1)
+            try
+            {
+                // The store holds the ADOPTED document's rows. Judged against a family document (Edit
+                // Family) every one of them "was gone" and left the panel, and the ledgers were pointed at
+                // the family (review 2026-10-31, H1). Anything that is not the session's own document waits.
+                if (!IsSessionDocument(doc)) return;   // auto-verify
 
                 // Cheap and idempotent — reloads only if the model actually changed,
                 // but always re-reads doc.Title so mid-session drift is recorded.
                 ClashStatusStore.Instance.LoadFor(doc);
                 ResolvedLog.LoadFor(doc);
+
+                // Fixes still waiting for a save are asked again here, every tick, whether or not auto-verify
+                // is on: a TransactionGroup rollback (a cancelled Revit error, another add-in's group) took a
+                // moved pipe's row off the panel and puts the geometry back, and no event is relied on to say
+                // so (review 2026-10-31, H2). This only ever puts rows back; it never removes one.
+                ClashUpdater.ReconcilePendingSlice(doc, s.VerifySliceSize, ReconcilePlan.TickBudgetMs, "tick");   // capped by count AND by time (SP8)
+                DroppedLinkRows.RelistFor(doc);   // link pairs dropped while their instance was deleted, if it is back (DM3)
 
                 if (!s.AutoVerify) { _lastVerifyUtc = DateTime.UtcNow; return; }
 
@@ -539,7 +749,8 @@ namespace LiveClash
 
                 var gone = new List<string>();
                 var goneResults = new List<ClashResult>();
-                var goneKeys = new List<string>();
+                var linkRemoved = new List<string>();   // rows whose link instance is gone for good
+                var linkRemovedRows = new List<ClashResult>();
                 int deferred = 0;
                 foreach (var r in slice)
                 {
@@ -556,9 +767,9 @@ namespace LiveClash
                         // right back. Deferred through the exact same queue the live updater's own
                         // deletion path already uses (QueueDeleted/FlushDeletedResolutions), which
                         // re-checks at save time and drops anything undone before then. Resolved
-                        // because the geometry genuinely moved apart (both elements still exist), or
-                        // because a LINK's own element vanished — not this document's undo stack to
-                        // worry about — is recorded right away, as before. Found reviewing the whole
+                        // because the geometry moved apart, or because a LINK's own element vanished,
+                        // is queued the same way since the 2026-10-31 review (H2, D-5): the move can be
+                        // undone too, and the save re-verifies it. Found reviewing the whole
                         // codebase, 2026-09-26: a deleted target, seen gone by the very next 5-second
                         // tick, then undone, left a permanent "fixed" entry for a clash still there.
                         var deletedId = DeletedElementIn(doc, r);
@@ -573,26 +784,34 @@ namespace LiveClash
                             // names and categories are gone with it, and the resolved log would have
                             // nothing readable to show.
                             goneResults.Add(r);
-                            goneKeys.Add(r.Key);
                         }
                     }
                     else if (verdict == PairVerifier.Verdict.StillClashing && sev != r.Severity)
                         ClashResultStore.Instance.UpdateSeverity(r.Key, sev);
+                    else if (PairVerifier.DropsRow(verdict, () => PairVerifier.LinkInstanceRemoved(doc, r)))
+                        { linkRemoved.Add(r.Key); linkRemovedRows.Add(r); }   // Unknown for good (delta review 2026-10-31, DN1): not fixed, just gone
+                }
+                if (linkRemoved.Count > 0)
+                {
+                    // Not recorded as fixed: nothing was measured. A link that is only unloaded keeps its rows (it
+                    // will be back); one whose instance was removed never will, and they would stay for ever.
+                    ClashResultStore.Instance.RemoveKeys(linkRemoved, asResolved: false);   // dropped, not fixed: never shown as just fixed (SP5)
+                    DroppedLinkRows.HoldFor(doc, linkRemovedRows);   // an undo of the deletion lists them again (DM3)
+                    var said = CheckOutcome.RemovedSentence(linkRemoved.Count);
+                    Log.Info("Auto-verify: " + said);
+                    var panel = ClashPaneProvider.Panel;
+                    if (panel != null) panel.SetStatus(said);
                 }
                 if (gone.Count > 0)
                 {
                     ClashResultStore.Instance.RemoveKeys(gone);
 
-                    if (goneResults.Count > 0)
-                    {
-                        // Against the decision first, so a pair that was accepted and has now
-                        // been fixed is remembered as gone — and shows as Reopened if it ever
-                        // comes back.
-                        ClashStatusStore.Instance.NoteGone(goneKeys);
-                        ResolvedLog.Add(goneResults);
-                    }
-                    Log.Info("Auto-verify: " + gone.Count + " clash(es) no longer present"
-                             + (deferred > 0 ? " (" + deferred + " deferred until save/sync)" : "") + ".");
+                    // Moved apart: queued for Save or Sync like a deletion, and re-verified then (review
+                    // 2026-10-31, H2 and decision D-5). Recorded at once, an undo a moment later left a
+                    // "fixed" entry for a clash that was back. The row still leaves the panel now.
+                    foreach (var r in goneResults) ClashUpdater.QueueMovedRow(doc, r);
+                    Log.Info("Auto-verify: " + gone.Count + " clash(es) no longer present (recorded at the next save or sync, re-checked then"
+                             + (deferred > 0 ? "; " + deferred + " of them deletions" : "") + ").");
                 }
             }
             catch (Exception ex)
@@ -613,6 +832,46 @@ namespace LiveClash
             if (r.LinkInstanceId == null && r.OtherElementId != null && !StillValid(doc, r.OtherElementId))
                 return r.OtherElementId;
             return null;
+        }
+
+        /// <summary>
+        /// Is <paramref name="doc"/> the session's own document, the one the store and the ledgers belong
+        /// to? The rule is <see cref="SessionGuard.ShouldActOn"/>; this only reads its facts. Never throws:
+        /// a document it cannot read is not acted on.
+        /// </summary>
+        internal static bool IsSessionDocument(Document doc)
+        {
+            try
+            {
+                if (doc == null || !doc.IsValidObject) return false;
+                return SessionGuard.ShouldActOn(doc.IsFamilyDocument, doc.IsLinked, ClashEngine.DocKey(doc), _adoptedDocKey);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>A transaction or a whole group was rolled back (not undone by the user).</summary>
+        internal static bool IsRollback(Autodesk.Revit.DB.Events.UndoOperation op)
+        {
+            return op == Autodesk.Revit.DB.Events.UndoOperation.TransactionRolledBack
+                || op == Autodesk.Revit.DB.Events.UndoOperation.TransactionGroupRolledBack;
+        }
+
+        /// <summary>Why an element left the model, from the DocumentChanged operation (see UndoPolicy).</summary>
+        internal static ChangeOrigin OriginOf(Autodesk.Revit.DB.Events.UndoOperation op)
+        {
+            if (op == Autodesk.Revit.DB.Events.UndoOperation.TransactionUndone) return ChangeOrigin.Undone;
+            if (op == Autodesk.Revit.DB.Events.UndoOperation.TransactionRedone) return ChangeOrigin.Redone;
+            if (IsRollback(op)) return ChangeOrigin.RolledBack;
+            return ChangeOrigin.Committed;
+        }
+
+        /// <summary>The operations after which the updater's work may no longer match the model.</summary>
+        internal static bool IsUndoLike(Autodesk.Revit.DB.Events.UndoOperation op)
+        {
+            return op == Autodesk.Revit.DB.Events.UndoOperation.TransactionUndone
+                || op == Autodesk.Revit.DB.Events.UndoOperation.TransactionRedone
+                || op == Autodesk.Revit.DB.Events.UndoOperation.TransactionRolledBack
+                || op == Autodesk.Revit.DB.Events.UndoOperation.TransactionGroupRolledBack;
         }
 
         /// <summary>
@@ -644,15 +903,42 @@ namespace LiveClash
         {
             try
             {
-                var doc = e.GetDocument();
-                if (doc == null || !doc.IsValidObject || doc.IsLinked) return;
+                HandleDocumentChanged(e.GetDocument(), e.GetAddedElementIds(), e.GetModifiedElementIds(),
+                    e.GetDeletedElementIds(), e.Operation);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("Document-changed handling failed", ex);
+            }
+        }
 
-                var addedIds = e.GetAddedElementIds();
-                var modifiedIds = e.GetModifiedElementIds();
+        /// <summary>
+        /// The body of <see cref="OnDocumentChanged"/>, with the event's facts passed in. Split out so
+        /// the in-Revit checks can drive it for a given document and operation (an undo, a rollback),
+        /// which a job cannot make Revit raise on demand.
+        /// </summary>
+        internal static void HandleDocumentChanged(Document doc, ICollection<ElementId> addedIds,
+            ICollection<ElementId> modifiedIds, ICollection<ElementId> deletedIds,
+            Autodesk.Revit.DB.Events.UndoOperation operation)
+        {
+            try
+            {
+                // Not the session's document (a family being edited, another open project): its ids are not
+                // the ones in the store, and RemoveForElement matches a bare id (review 2026-10-31, H1).
+                if (!IsSessionDocument(doc)) return;   // undo/redo
+
+                // The ids a COMMITTED transaction deleted are remembered FIRST, before anything below that can throw: a later rollback tells an element
+                // a user deleted (a fix, still waiting in the queue or on the panel) from one whose CREATION it undid by this memory (M-2, D-5).
+                try
+                {
+                    if (deletedIds != null && deletedIds.Count > 0 && OriginOf(operation) == ChangeOrigin.Committed)
+                        ClashUpdater.NoteCommittedDeletions(doc, deletedIds);
+                }
+                catch (Exception ex) { Log.Warn("Could not remember a committed deletion", ex); }
+
                 var touched = new List<ElementId>();
                 touched.AddRange(modifiedIds);
                 touched.AddRange(addedIds);
-                var deletedIds = e.GetDeletedElementIds();
 
                 // Ahead of NoteChanged, on the same ids, for the same reason it runs for
                 // every transaction: a link change here is a signal the panel should show,
@@ -700,9 +986,12 @@ namespace LiveClash
                 // Execute had just restored and replace instant detection with a flicker
                 // to empty followed by a deferred idle re-check — for every edit, not
                 // just the target-only ones this exists to cover.
-                if (e.Operation != Autodesk.Revit.DB.Events.UndoOperation.TransactionUndone
-                    && e.Operation != Autodesk.Revit.DB.Events.UndoOperation.TransactionRedone)
-                    return;
+                //
+                // A ROLLBACK is the same case (review 2026-10-31, H2): the updater ran for the edit, took
+                // its rows off and queued its fixes, and then the transaction (a cancelled Revit error) or
+                // a TransactionGroup (another add-in) was rolled back. The geometry is back; nothing else
+                // re-checks it.
+                if (!IsUndoLike(operation)) return;
 
                 // Updaters do not run for undo/redo, so this is the ONLY place a row an undo or a
                 // redo orphaned ever gets a chance at being reconciled — nothing downstream (a
@@ -713,15 +1002,42 @@ namespace LiveClash
                 // a moment later still cannot leave a false "fixed" entry; a target-only or
                 // host-changed row is reconciled directly with PairVerifier. Found reviewing the
                 // whole codebase, 2026-09-27, right after the same-shaped ClashUpdater gap.
+                // An element that vanishes in an UNDO or a ROLLBACK had its creation undone: the user never deleted it, the pair never existed in a saved
+                // state, and recording it as fixed at the save made the permanent record claim a fix for a clash nobody had (M-2, second pass). A REDO
+                // is a deletion done again, and a committed one is the user's own: those are queued as always.
+                var origin = OriginOf(operation);
+                bool vanishedIsAFix = UndoPolicy.DeletedElementIsAFix(origin);
+                int dropped = 0;
+                if (origin == ChangeOrigin.RolledBack)
+                    dropped += ClashUpdater.DropRowsOfVanishedElements(doc);   // a rollback lists no ids (measured): find the rows whose element is gone
                 foreach (var id in deletedIds)
-                    foreach (var r in ClashResultStore.Instance.RemoveForElement(id))
+                    foreach (var r in ClashResultStore.Instance.RemoveForElement(id, asResolved: vanishedIsAFix))
                         if (r != null && !string.IsNullOrEmpty(r.Key))
-                            ClashUpdater.QueueRemovedRow(doc, id, r);
+                        {
+                            if (vanishedIsAFix) ClashUpdater.QueueRemovedRow(doc, id, r);
+                            else dropped++;
+                        }
+                if (dropped > 0)
+                    Log.Info(dropped + " listed clash(es) dropped, not recorded as fixed: the element they clash on vanished because its creation was "
+                             + (origin == ChangeOrigin.Undone ? "undone" : "rolled back") + ".");
 
                 List<ClashResult> hostChanged;
                 var targetOnly = ClashUpdater.SplitRemovedRows(touched, ClashResultStore.Instance.RemoveForElement, out hostChanged);
                 if (targetOnly.Count > 0) ClashUpdater.ReverifyTargetOnly(doc, ClashSettings.Current, targetOnly);
                 if (hostChanged.Count > 0) ClashUpdater.ReverifyHostChanged(doc, ClashSettings.Current, hostChanged, "undo/redo");
+
+                // Fixes still waiting for a save that this undo or rollback may have taken back: an undone
+                // TARGET deletion (M1) and a rolled-back move (H2) come back on the panel here, and leave the
+                // queue, because no other path would ever re-test them.
+                var asked = new List<ElementId>(touched);
+                asked.AddRange(deletedIds);
+                ClashUpdater.ReconcilePending(doc, asked);
+                DroppedLinkRows.RelistFor(doc);   // an undo that restored a deleted link instance (DM3)
+
+                // A rollback can reverse many transactions at once and may list no ids at all, so for a rollback
+                // every queued fix is asked, not only those that name an id the event listed (capped; the idle
+                // pass takes the rest).
+                if (IsRollback(operation)) ClashUpdater.ReconcilePendingSlice(doc, ReconcilePlan.RollbackMaxItems, ReconcilePlan.RollbackBudgetMs, "rollback");   // capped by count AND by time; the idle pass reaches the rest (SP8)
 
                 // Still deferred for a FRESH check: reconciling the OLD rows above only answers
                 // whether what was already listed is still true, never whether the undo/redo
@@ -826,9 +1142,25 @@ namespace LiveClash
 
                 // OriginalPath is the key for a model that had been saved. For one that had NEVER been saved it
                 // is empty, and the key was captured in OnDocumentSavingAs.
-                string from = e.OriginalPath;
-                if (string.IsNullOrEmpty(from)) from = TakeSavingAsKey(e.Document);
+                // DL-f (round 8): the key captured in DocumentSavingAs (the same function that keyed the stores and the queue) wins over
+                // OriginalPath, which can be spelled differently (cloud, UNC, a mapped drive).
+                string from = SaveAsCarry.FromKey(TakeSavingAsKey(e.Document), e.OriginalPath);
                 int moved = ClashUpdater.RekeyPending(from, ClashEngine.DocKey(e.Document));
+
+                // Edits still waiting for an idle re-check were keyed by the old path too, and were never
+                // checked after a Save As (review 2026-10-31, LOW-2). Any document's, active or not.
+                DeferredQueue.Rekey(from, ClashEngine.DocKey(e.Document));
+                SaveAsCarry.RekeyHeldRows(from, ClashEngine.DocKey(e.Document));   // D3-2(b): link pairs held for an undo follow the document
+
+                // A family being edited (Edit Family) or a link is never the session's document, however active it
+                // is: Adopt and OnViewActivated exclude them, and this handler did not, so a Save As of a family
+                // carried the PROJECT's settings, triage and record to the family's name and moved the adopted key
+                // onto it (F3's report, review 2026-10-31). Left to the project's own events.
+                if (!SessionGuard.CanOwnSession(e.Document.IsFamilyDocument, e.Document.IsLinked))
+                {
+                    Log.Info("Save As on a family or linked document: the session is left on the project.");
+                    return;
+                }
 
                 // The ledgers are a SESSION singleton aimed at the adopted (= active) model. A Save
                 // As on some OTHER open document would drag them onto itself, and every later fix in
@@ -843,9 +1175,20 @@ namespace LiveClash
                     return;
                 }
 
-                ClashSettings.LoadFor(e.Document);
-                ClashStatusStore.Instance.LoadFor(e.Document);
-                ResolvedLog.LoadFor(e.Document);
+                // Carry the settings, triage, resolved record and audit labels to the new name rather
+                // than loading the new name afresh, which reset them to defaults (review 2026-10-31, M4).
+                if (!ModelLedgers.FollowSaveAs(e.Document, from))
+                {
+                    // The stores are not this document's (round 3b): an active family document, or a new project that never
+                    // reached Adopt. Same as a document that is not the active one: its queue was re-keyed above and waits, and
+                    // _adoptedDocKey stays where it was, so a later Adopt of this document loads its own.
+                    if (moved > 0)
+                        Log.Info("Save As on a document the settings and ledgers do not belong to: " + moved
+                                 + " queued deletion(s) re-keyed, ledgers left where they were.");
+                    // The saved document's key moved and the adopted key did not: ask for the idle follow now, not at Idling's next ~2.5 s tick.
+                    RequestFollow();
+                    return;
+                }
 
                 // _adoptedDocKey is compared against ClashEngine.DocKey, which is the file PATH —
                 // and Save As just changed it. Left stale, the very next ViewActivated (which fires
@@ -868,8 +1211,9 @@ namespace LiveClash
             }
         }
 
-        // The queue key of a never-saved model, captured just before its first Save As, by the document's
-        // creation GUID - which belongs to exactly one document and, unlike its title or path, does not
+        // The queue key of a document, captured just before ANY Save As (a never-saved model's first one, and, since DL-f of round 8, a
+        // saved model's too: it is ClashEngine.DocKey, the same function that keyed the stores and the queue, and OriginalPath is only the
+        // fallback), by the document's creation GUID - which belongs to exactly one document and, unlike its title or path, does not
         // change underneath the entry. Never a guess and never shared between models.
         private static readonly Dictionary<Guid, string> SavingAsKeys = new Dictionary<Guid, string>();
 
@@ -890,7 +1234,6 @@ namespace LiveClash
             {
                 var doc = e == null ? null : e.Document;
                 if (doc == null || !doc.IsValidObject) return;
-                if (!string.IsNullOrEmpty(doc.PathName)) return;   // a saved model: OriginalPath will be the key
                 lock (SavingAsKeys) SavingAsKeys[doc.CreationGUID] = ClashEngine.DocKey(doc);
             }
             catch (Exception ex)
@@ -959,6 +1302,13 @@ namespace LiveClash
 
         private void OnDocumentOpened(object sender, Autodesk.Revit.DB.Events.DocumentOpenedEventArgs e)
         {
+            try { HandleDocumentOpened(sender, e == null ? null : e.Document); }
+            catch (Exception ex) { Log.Warn("Document-opened handling failed", ex); }
+        }
+
+        /// <summary>The body of <see cref="OnDocumentOpened"/>, with the document passed in (the in-Revit checks open a real one).</summary>
+        internal static void HandleDocumentOpened(object sender, Document doc)
+        {
             // A LINKED document opening in the background — at minimum when the host
             // document is opened and Revit loads its links; NOT confirmed for a live
             // reload of an already-open link, which was tested directly on Revit 2026
@@ -969,8 +1319,19 @@ namespace LiveClash
             // settings, so it seeded the default filter and the host model's rules
             // vanished for the rest of the session. Only the host/project document
             // drives session state.
-            if (e.Document == null || e.Document.IsLinked || e.Document.IsFamilyDocument) return;
-            Adopt(e.Document, "opened");
+            if (doc == null || doc.IsLinked || doc.IsFamilyDocument) return;
+
+            // A PROJECT opened in the background is no more the user switching models than a link is: an add-in that
+            // opens a project through the API with no view raises DocumentOpened and never ViewActivated. Adopting it
+            // took the session off the user's own model, and every live path needs the adopted key (SP3). Only the
+            // document the user has active is adopted here; a view switch adopts any other, as it always has.
+            // IsActiveDocument answers "yes" when it cannot tell, the behaviour before this check existed.
+            if (!SessionGuard.ShouldAdoptOnOpen(doc.IsFamilyDocument, doc.IsLinked, IsActiveDocument(sender, doc)))
+            {
+                Log.Info("A project was opened that is not the active one; the session stays on the model in use.");
+                return;
+            }
+            Adopt(doc, "opened");
         }
 
         /// <summary>
@@ -1014,6 +1375,7 @@ namespace LiveClash
             if (key == _adoptedDocKey) return;
 
             _adoptedDocKey = key;
+            RememberAdoptedIdentity(doc);
 
             // Results are per-session and per-document; a fresh document starts clean.
             ClashResultStore.Instance.Clear();
@@ -1075,6 +1437,124 @@ namespace LiveClash
                 }
             }
             catch (Exception ex) { Log.Warn("Panel notify on document switch failed", ex); }
+        }
+
+        /// <summary>
+        /// Round 8, fix B: the active project's key moved under the document the session adopted (a Detach gives the document a new path after
+        /// its first view was adopted). Follows it: re-keys the queued fixes and adopts the document under its new key. Returns whether it followed.
+        /// <paramref name="active"/> is the document the user has active (the idle tick passes the active one). The rule is SessionGuard.ShouldFollowPathChange.
+        /// </summary>
+        internal static bool FollowPathChange(Document active)
+        {
+            try
+            {
+                if (active == null || !active.IsValidObject) return false;
+                string now = ClashEngine.DocKey(active), adopted = _adoptedDocKey;
+                if (string.IsNullOrEmpty(adopted) || string.Equals(now, adopted, StringComparison.Ordinal)) return false;   // the idle tick asks every time: no walk over the open documents for nothing (R2-9)
+                if (!SessionGuard.ShouldFollowPathChange(active.IsFamilyDocument, active.IsLinked, IsActiveDocument(active.Application, active), IsTheAdoptedDocument(active),
+                        AdoptedKeyIsHeld(active, adopted), now, adopted))
+                    return false;
+
+                // Fixes queued under the old key follow the document; the held link rows and the list belong to the old key and go (Adopt clears
+                // the list, exactly as the user's next view switch would).
+                int moved = ClashUpdater.RekeyPending(adopted, now);
+                DroppedLinkRows.Forget(adopted);
+                Log.Info("The active document's path changed under the session (a Detach, for one): following it; " + moved + " queued fix(es) re-keyed.");
+                Adopt(active, "its path changed");
+                return string.Equals(_adoptedDocKey, now, StringComparison.Ordinal);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("Following a document new path failed", ex);
+                return false;
+            }
+        }
+
+        // The early follow after a Save As whose carry was refused (round 8, SK). The carry is refused when the stores are not the saved document's,
+        // and OnDocumentSavedAs then returns before the adopted key is updated: the saved document is not the session's until the idle tick's
+        // FollowPathChange (fix B) runs, and Idling fires only about every 2.5 s. SetRaiseWithoutDelay exists only INSIDE an Idling event, so a flag
+        // cannot bring the first tick forward; an ExternalEvent runs as soon as Revit is idle. Nothing is adopted inside the save event itself (Adopt
+        // clears the lists and reloads the stores, too much to do in Revit's save event): the request only asks the SAME follow rule to run early.
+        // That rule (SessionGuard.ShouldFollowPathChange) is what stops a document that is not the session's from being adopted.
+        private static volatile bool _followRequested;
+        private static ExternalEvent _followEvent;
+
+        /// <summary>A follow was asked for after a refused Save As carry and has not run yet.</summary>
+        internal static bool FollowRequested { get { return _followRequested; } }
+
+        /// <summary>Ask for the follow now. Never throws.</summary>
+        private static void RequestFollow()
+        {
+            _followRequested = true;
+            try
+            {
+                if (_followEvent != null)
+                {
+                    var raised = _followEvent.Raise();
+                }
+            }
+            catch (Exception ex) { Log.Warn("Could not ask for the follow after a Save As", ex); }
+        }
+
+        /// <summary>The follow the request asks for: the idle tick's own <see cref="FollowPathChange"/> on the active document. The request is spent
+        /// whether or not anything needed following. Returns whether it followed.</summary>
+        internal static bool RunFollowRequest(Document active)
+        {
+            try { return FollowPathChange(active); }
+            finally { _followRequested = false; }
+        }
+
+        private sealed class FollowHandler : IExternalEventHandler
+        {
+            public void Execute(UIApplication app)
+            {
+                try
+                {
+                    var ud = app == null ? null : app.ActiveUIDocument;
+                    RunFollowRequest(ud == null ? null : ud.Document);
+                }
+                catch (Exception ex) { Log.Warn("The follow after a Save As failed", ex); }
+            }
+
+            public string GetName() { return "LiveClash follow after Save As"; }
+        }
+
+        // The adopted document itself, so a moved key can be told from another document. By the object, never by CreationGUID: a copy of a
+        // file has the same GUID as the original, so a sibling copy matched (delta review L-1). If the object does not match, the rule falls
+        // back on "no open document holds the adopted key any more".
+        private static WeakReference _adoptedDocRef;
+
+        private static void RememberAdoptedIdentity(Document doc)
+        {
+            try { _adoptedDocRef = new WeakReference(doc); }
+            catch { _adoptedDocRef = null; }
+        }
+
+        private static bool IsTheAdoptedDocument(Document doc)
+        {
+            try
+            {
+                var r = _adoptedDocRef;
+                if (r != null && r.IsAlive && SessionGuard.IsSameObject(r.Target, doc)) return true;   // Equals too: Revit may hand out a fresh wrapper (delta review R2-3)
+                return false;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Does some open document (the active one, a background one, a link) still have the adopted key as its key?</summary>
+        private static bool AdoptedKeyIsHeld(Document any, string adoptedKey)
+        {
+            if (string.IsNullOrEmpty(adoptedKey)) return false;
+            try
+            {
+                foreach (Document d in any.Application.Documents)
+                {
+                    if (d == null || !d.IsValidObject) continue;
+                    if (string.Equals(ClashEngine.DocKey(d), adoptedKey, StringComparison.Ordinal)) return true;
+                }
+            }
+            catch { }
+            return false;
         }
 
         /// <summary>
@@ -1164,6 +1644,55 @@ namespace LiveClash
             }
         }
 
+        /// <summary>
+        /// A document is closing (the body of the DocumentClosing handler's new part). RED STUB (r8 live): does nothing; the green commit notes the id and key
+        /// in CloseTracker.Shared and the handlers call this.
+        /// </summary>
+        internal static void ClosingFor(int documentId, string key)
+        {
+            CloseTracker.Shared.Closing(documentId, key);
+        }
+
+        /// <summary>
+        /// Revit reported a close (the body of the DocumentClosed handler). Finalises the document noted under <paramref name="documentId"/> only when the
+        /// close SUCCEEDED. RED STUB (r8 live): does nothing.
+        /// </summary>
+        internal static void ClosedFor(int documentId, bool succeeded)
+        {
+            string key = CloseTracker.Shared.Closed(documentId, succeeded);
+            if (key != null) FinalizeClosedDocument(key);
+        }
+
+        /// <summary>
+        /// A document really closed (Revit reported DocumentClosed with the status Succeeded). Everything LiveClash kept for it goes: its deferred
+        /// re-checks, its held link rows, its memory of committed deletions, its queued fixes (an unsaved deletion is not a fix, and left behind they could
+        /// be re-keyed onto a different model that reuses the name), and, if it was the session's own document, the list, the warm contexts and the adopted
+        /// key (so reopening the same model is a real adoption). This used to run at DocumentClosing, which a close that another add-in cancels
+        /// never completes: the queued fixes of a document that stayed open were gone (found by the P9-3 probe).
+        /// </summary>
+        private static void FinalizeClosedDocument(string key)
+        {
+            DeferredQueue.ClearKey(key);
+            SaveAsCarry.ForgetHeldRows(key);   // D3-2(c): a reopen must not say "their link came back"
+            ClashUpdater.ForgetCommittedDeletions(key);
+            int dropped = ClashUpdater.DropPending(key);
+            if (dropped > 0)
+                Log.Info("A document closed with " + dropped + " queued deletion(s) never recorded: an unsaved deletion is not a fix.");
+
+            // BUT ONLY THE SESSION'S OWN DOCUMENT CLEARS THE SESSION (closing B used to clear A's results while A stayed adopted).
+            if (key != _adoptedDocKey) return;
+            ClashResultStore.Instance.Clear();
+            ClashEngine.InvalidateAll();
+            _adoptedDocKey = null;
+            _adoptedDocRef = null;
+        }
+
+        private void OnDocumentClosed(object sender, Autodesk.Revit.DB.Events.DocumentClosedEventArgs e)
+        {
+            try { ClosedFor(e.DocumentId, e.Status == Autodesk.Revit.DB.Events.RevitAPIEventStatus.Succeeded); }
+            catch (Exception ex) { Log.Warn("Close handling failed", ex); }
+        }
+
         private void OnDocumentClosing(object sender, Autodesk.Revit.DB.Events.DocumentClosingEventArgs e)
         {
             try
@@ -1194,41 +1723,13 @@ namespace LiveClash
                 }
                 if (e.Document == null) return;
 
-                // Its own deferred work goes either way — that queue is already per
-                // document, and a closing model's pending ids are dead whoever is active.
-                DeferredQueue.Clear(e.Document);
+                // Note the close; DocumentClosed (status Succeeded) does the cleanup. Doing it here dropped the queued fixes of a document whose close
+                // another add-in then cancelled (P9-3). Keyed by the document's id, so a file closed without saving and opened again is a different entry.
+                ClosingFor(e.DocumentId, ClashEngine.DocKey(e.Document));
 
-                // Likewise its queued DELETIONS awaiting a save: closing ends their chance of ever being
-                // recorded, and left behind they could be re-keyed onto a different model that reuses the
-                // name (see ClashUpdater.DropPending).
-                int dropped = ClashUpdater.DropPending(ClashEngine.DocKey(e.Document));
-                if (dropped > 0)
-                    Log.Info("Closed '" + SafeTitle(e.Document) + "' with " + dropped
-                             + " queued deletion(s) never recorded: an unsaved deletion is not a fix.");
-
-                // Same reasoning for its focus view: the entry holds an ElementId in the
-                // document that is closing, so it is dead whichever model stays active.
-                // Above the adoption guard for exactly that reason.
+                // The focus view entry holds an ElementId in the document that is closing and needs the Document object, so it goes here; it is
+                // harmless if the close is cancelled (the next Focus makes a view again).
                 UI.FocusHandler.Forget(e.Document);
-
-                // BUT ONLY THE SESSION'S OWN DOCUMENT CLEARS THE SESSION. With two projects
-                // open and A active, closing B used to clear A's results and drop A's warm
-                // target index — so A's next edit paid the rebuild and blew the update
-                // budget, the panel emptied with whatever banner happened to be showing,
-                // and nothing re-adopted because A was still the adopted document.
-                //
-                // That was survivable while two open models were an accident. Adopt() and
-                // ViewActivated made it a supported way to work, which is what turned this
-                // into a real fault: it is the failure DocumentSwitched exists to explain,
-                // arrived at from the other side and with no explanation at all.
-                if (ClashEngine.DocKey(e.Document) != _adoptedDocKey) return;
-
-                ClashResultStore.Instance.Clear();
-                ClashEngine.InvalidateAll();
-
-                // Forget it, so reopening the same model is a real adoption rather than
-                // being skipped by Adopt's "already ours" guard.
-                _adoptedDocKey = null;
             }
             catch { }
         }

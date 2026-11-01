@@ -36,12 +36,13 @@ namespace LiveClash.UI
             try
             {
                 var uidoc = app.ActiveUIDocument;
-                var doc = uidoc != null ? uidoc.Document : null;
+                var doc = HandlerGuard.Pick(uidoc);
                 if (doc == null || !doc.IsValidObject)
                 {
                     Report("Rechecking the record needs an open model.");
                     return;
                 }
+                if (HandlerGuard.Refuses(doc, Panel, "recheck the record")) return;
 
                 var decided = ClashStatusStore.Instance.All();
                 if (decided.Count == 0)

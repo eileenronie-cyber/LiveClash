@@ -119,7 +119,7 @@ namespace LiveClash.Commands
             if (s.ClearanceFeet != before && s.Sets.Any(set => !set.ClearanceFeet.HasValue))
             {
                 ClashEngine.InvalidateAll();
-                ClashResultStore.Instance.Clear();
+                LiveClashApp.ClearResultsForNewRules();   // the list and the held link rows (delta review 3, D3-2)
                 ClashPaneProvider.Panel.SetEmptyReason(ClashPanel.EmptyReason.ClearanceChanged);
             }
 

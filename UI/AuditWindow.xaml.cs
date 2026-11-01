@@ -338,9 +338,14 @@ namespace LiveClash.UI
                 {
                     // Already held by a legacy keyword: nothing to add, and writing a
                     // pair too would duplicate a rule the user cannot see from here.
-                    if (!DroppedByKeyword(r.Finding) && seen.Add(key))
+                    // Already held by a pair: nothing to add either. Counting those as
+                    // drops made a reopened audit, Applied with nothing touched, ask to
+                    // "drop 1 family+type" and then clear every result for no change.
+                    if (!DroppedByKeyword(r.Finding) && !DroppedExactly(r.Finding) && seen.Add(key))
+                    {
                         Dropped.Add(new TypeKey { Family = fam, Type = typ });
-                    instances += r.InstanceCount;
+                        instances += r.InstanceCount;
+                    }
                 }
                 else if (DroppedExactly(r.Finding))
                 {

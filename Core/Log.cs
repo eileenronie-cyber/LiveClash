@@ -73,6 +73,74 @@ namespace LiveClash.Core
                    + " since " + _sessionStart.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + ".";
         }
 
+        // ------------------------------------------------------------------ scrub
+        //
+        // The pilot guide asks users to send this file back, and it held model titles, link names and
+        // paths with the Windows user name in them (review 2026-10-31, LOW-11; X1/X2). So every line
+        // is scrubbed on its way in, in this order:
+        //   1. %LOCALAPPDATA% and the profile folder become those words (the user name goes with them);
+        //   2. any other absolute path keeps its file name and loses its folders ("<dir>\x.rvt");
+        //   3. each name noted as sensitive (the model keys the stores load) becomes "model#" plus a
+        //      short hash, the same tag every time, so a log still reads as one story;
+        //   4. the Windows user name, as a whole word, becomes "<user>".
+        // Link names a store never sees are not known here; they are caught by 2 when they arrive in a path.
+
+        private static string[] _sensitive = Array.Empty<string>();   // copy-on-write, longest first
+
+        /// <summary>A model title, link name or file key that must not reach the log as written. Names
+        /// shorter than 3 characters are ignored (they would scrub ordinary words).</summary>
+        public static void NoteSensitive(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return;
+            name = name.Trim();
+            if (name.Length < 3) return;
+            lock (Gate)
+            {
+                foreach (var s in _sensitive) if (string.Equals(s, name, StringComparison.OrdinalIgnoreCase)) return;
+                var next = new System.Collections.Generic.List<string>(_sensitive) { name };
+                next.Sort((a, b) => b.Length.CompareTo(a.Length));
+                _sensitive = next.ToArray();
+            }
+        }
+
+        /// <summary>The tag a sensitive name is logged as.</summary>
+        internal static string Tag(string name) { return "model#" + ShortHash.Of((name ?? "").Trim().ToLowerInvariant()); }
+
+        private static readonly System.Text.RegularExpressions.Regex ForeignDirs = new System.Text.RegularExpressions.Regex(
+            @"(?:\b[A-Za-z]:\\|\\\\)(?:[^\\/:*?""<>|\r\n']+\\)+", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+        /// <summary>What a log line says once titles, paths and the user name are taken out (see above).</summary>
+        internal static string Scrub(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return s;
+            s = ReplaceFolder(s, Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "%LOCALAPPDATA%");
+            s = ReplaceFolder(s, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "%USERPROFILE%");
+            s = ForeignDirs.Replace(s, "<dir>\\");
+            foreach (var name in _sensitive) s = ReplaceWord(s, name, Tag(name));
+            s = ReplaceUser(s, Environment.UserName);
+            return s;
+        }
+
+        /// <summary>The Windows user name as a whole word, unless it is too short to tell from an ordinary word.</summary>
+        internal static string ReplaceUser(string s, string user)
+        {
+            return string.IsNullOrEmpty(user) || user.Length < 3 ? s : ReplaceWord(s, user, "<user>");
+        }
+
+        internal static string ReplaceFolder(string s, string folder, string token)
+        {
+            if (string.IsNullOrEmpty(folder) || folder.Length < 4) return s;
+            return System.Text.RegularExpressions.Regex.Replace(s, System.Text.RegularExpressions.Regex.Escape(folder.TrimEnd('\\')),
+                token, System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        }
+
+        internal static string ReplaceWord(string s, string word, string token)
+        {
+            return System.Text.RegularExpressions.Regex.Replace(s,
+                @"(?<![A-Za-z0-9])" + System.Text.RegularExpressions.Regex.Escape(word) + @"(?![A-Za-z0-9])",
+                token, System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        }
+
         private static void Write(string level, string message, Exception ex)
         {
             try
@@ -93,7 +161,7 @@ namespace LiveClash.Core
                 lock (Gate)
                 {
                     RollIfBig();
-                    File.AppendAllText(Path, sb.ToString() + Environment.NewLine);
+                    File.AppendAllText(Path, Scrub(sb.ToString()) + Environment.NewLine);   // scrubbed: see above
                 }
             }
             catch

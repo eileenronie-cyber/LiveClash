@@ -143,6 +143,14 @@
       </DockPanel>
     </Border>
 
+    <!-- collection notice (LOW-12): a host or link whose elements could not be read; hidden when nothing is standing. -->
+    <Border x:Name="CollectionNoticeBar" DockPanel.Dock="Top" Visibility="Collapsed" Padding="10,7"
+            Background="{DynamicResource EndsInBg}"
+            BorderBrush="{DynamicResource Hairline}" BorderThickness="0,0,0,1">
+      <TextBlock x:Name="CollectionNoticeText" TextWrapping="Wrap"
+                 Foreground="{DynamicResource EndsInFg}" FontWeight="SemiBold"/>
+    </Border>
+
     <!-- status bar -->
     <Border DockPanel.Dock="Bottom" Padding="10,5" Background="{DynamicResource StatusBg}"
             BorderBrush="{DynamicResource Hairline}" BorderThickness="0,1,0,0">

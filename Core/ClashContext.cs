@@ -13,6 +13,9 @@ namespace LiveClash.Core
     {
         public List<LinkContext> Links = new List<LinkContext>();
 
+        /// <summary>The labels ("the host model", "link 'X'") whose target collection threw while this context was built, so it does not cover them (LOW-12, L-2).</summary>
+        public List<string> Unread { get; } = new List<string>();
+
         /// <summary>Spatial index over the host document's target elements.</summary>
         public TargetIndex HostTargets;
 
@@ -149,6 +152,101 @@ namespace LiveClash.Core
                 }
             }
         }
+
+        // ---------------------------------------------------------------- source index (the reverse check)
+
+        /// <summary>One spatial index of the host's SOURCE elements, for one set of source categories.</summary>
+        private sealed class SourceIdx
+        {
+            public HashSet<BuiltInCategory> Cats;
+            public TargetIndex Index;
+        }
+
+        private readonly Dictionary<string, SourceIdx> _hostSources = new Dictionary<string, SourceIdx>(StringComparer.Ordinal);
+
+        private static string SourceKey(HashSet<BuiltInCategory> cats)
+        {
+            var ids = new List<int>(cats.Count);
+            foreach (var c in cats) ids.Add((int)c);
+            ids.Sort();
+            return string.Join(",", ids.ConvertAll(i => i.ToString(System.Globalization.CultureInfo.InvariantCulture)).ToArray());
+        }
+
+        /// <summary>
+        /// A spatial index over the host document's SOURCE elements of one set, for the REVERSE check: when a TARGET
+        /// element changes, which source elements are near it? (The forward check asks the opposite, through
+        /// <see cref="HostTargets"/>: which targets are near this source?) Built from the categories alone, a superset
+        /// of what the set will really check as sources; the engine applies the set's source rules itself when it
+        /// checks each candidate. Held with the context, so it is dropped with it, and kept in step by
+        /// <see cref="PatchHostSource"/>. Contexts are shared between sets with the same targets, so the index is
+        /// kept per source-category set. Null when the collection failed (logged once): the caller then has nothing
+        /// to check against.
+        /// </summary>
+
+        internal TargetIndex HostSourceIndex(Document doc, HashSet<BuiltInCategory> sourceCats)
+        {
+            if (doc == null || !doc.IsValidObject || sourceCats == null || sourceCats.Count == 0) return null;
+            string key = SourceKey(sourceCats);
+            SourceIdx held;
+            lock (_hostSources)
+                if (_hostSources.TryGetValue(key, out held)) return held.Index;
+
+            TargetIndex idx;
+            try
+            {
+                var ids = new FilteredElementCollector(doc)
+                    .WhereElementIsNotElementType()
+                    .WherePasses(new ElementMulticategoryFilter(new List<BuiltInCategory>(sourceCats)))
+                    .ToElementIds();
+                idx = TargetIndex.Build(doc, ids);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("Source collection failed in the host - a change to a target element will not be checked against the sources near it.", ex);
+                idx = null;
+            }
+            lock (_hostSources) _hostSources[key] = new SourceIdx { Cats = new HashSet<BuiltInCategory>(sourceCats), Index = idx };
+            return idx;
+        }
+
+        /// <summary>Keep every built source index in step with one edited element. A no-op for an index not built yet.</summary>
+        internal void PatchHostSource(Document doc, ElementId id, bool valid, BuiltInCategory bic)
+        {
+            List<SourceIdx> built;
+            lock (_hostSources) built = new List<SourceIdx>(_hostSources.Values);
+            foreach (var s in built)
+            {
+                if (s.Index == null) continue;
+                if (valid && s.Cats.Contains(bic)) s.Index.Insert(doc, id);
+                else s.Index.Remove(id);
+            }
+        }
+
+        /// <summary>Drop a deleted element from every built source index.</summary>
+        internal void RemoveHostSource(ElementId id)
+        {
+            List<SourceIdx> built;
+            lock (_hostSources) built = new List<SourceIdx>(_hostSources.Values);
+            foreach (var s in built) if (s.Index != null) s.Index.Remove(id);
+        }
+
+        /// <summary>
+        /// A context that holds ONE host target and nothing else: the reverse check runs the engine's own source-side
+        /// check for each source near a changed target against just that target, so every rule (suppression of connected
+        /// pairs, hosted elements, clearance, insulation, drops) applies unchanged and a pair costs a pair. No links:
+        /// the reverse check is host against host. The host insulation index is shared with this context when the set
+        /// is insulation-aware, so it is not rebuilt per call.
+        /// </summary>
+        internal ScanContext ForSingleTarget(Document doc, ElementId target, bool insulationAware)
+        {
+            var c = new ScanContext { HostTargets = TargetIndex.Build(doc, new List<ElementId> { target }) };
+            if (insulationAware)
+            {
+                c._hostInsulation = HostInsulationIndex(doc);
+                c._hostInsulationBuilt = true;
+            }
+            return c;
+        }
     }
 
     /// <summary>
@@ -163,6 +261,12 @@ namespace LiveClash.Core
     /// </summary>
     public static class ClashContext
     {
+        /// <summary>What the checks call the host model when its target collection fails (LOW-12).</summary>
+        internal const string HostLabel = "the host model";
+
+        /// <summary>What the checks call a link when its target collection fails (LOW-12).</summary>
+        internal static string LinkLabel(string linkName) { return "link '" + linkName + "'"; }
+
         /// <summary>
         /// Collect the links and the target id sets. One document-wide query per
         /// document — see the class comment for why this must not be per element.
@@ -180,15 +284,16 @@ namespace LiveClash.Core
 
             if (settings.CheckHostVsHost)
             {
-                try
+                // Through Collect: a collector that throws is recorded, so the check can say the host was not checked
+                // instead of ending as "checked and clean" (LOW-12).
+                ctx.HostTargets = CollectionFailures.Collect(HostLabel, () =>
                 {
                     var ids = new FilteredElementCollector(doc)
                         .WhereElementIsNotElementType()
                         .WherePasses(settings.BuildTargetFilter(set))
                         .ToElementIds();
-                    ctx.HostTargets = TargetIndex.Build(doc, ids);
-                }
-                catch (Exception ex) { Log.Warn("Host target collection failed", ex); }
+                    return TargetIndex.Build(doc, ids);
+                }, ctx.Unread);
             }
 
             if (settings.CheckHostVsLinks)
@@ -210,7 +315,9 @@ namespace LiveClash.Core
 
                     ctx.LinkTargetFilters[link] = linkFilter;
 
-                    try
+                    // Through Collect, as the host is: a link whose collection throws is left out of the sweep AND recorded (LOW-12).
+                    var label = LinkLabel(link.Name);
+                    var index = CollectionFailures.Collect(label, () =>
                     {
                         var ids = new FilteredElementCollector(link.Document)
                             .WhereElementIsNotElementType()
@@ -219,13 +326,10 @@ namespace LiveClash.Core
 
                         // Boxes stay in LINK coordinates; the host box is transformed
                         // into link space at query time instead.
-                        ctx.LinkTargets.Add(new KeyValuePair<LinkContext, TargetIndex>(
-                            link, TargetIndex.Build(link.Document, ids)));
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Warn("Target collection failed in link " + link.Name, ex);
-                    }
+                        return TargetIndex.Build(link.Document, ids);
+                    }, ctx.Unread);
+                    if (index != null)
+                        ctx.LinkTargets.Add(new KeyValuePair<LinkContext, TargetIndex>(link, index));
                 }
             }
 
@@ -388,8 +492,10 @@ namespace LiveClash.Core
         /// <summary>
         /// Backstop only. The index is kept correct incrementally by
         /// <see cref="NoteChanged"/>, so this exists purely for changes the updater
-        /// cannot see — a target-category element edited when that category is NOT
-        /// also a source, which no trigger fires for.
+        /// cannot see. (That used to include a target-category element edited when
+        /// that category is NOT also a source, which no trigger fired for; the trigger
+        /// now watches target categories too - review N1 - and DocumentChanged still
+        /// patches the indexes for every committed transaction.)
         ///
         /// It was 30 seconds, and that was wrong: a rebuild costs ~330 ms on a
         /// 40,000-target model, and at real modelling pace most edits land more than
@@ -426,6 +532,7 @@ namespace LiveClash.Core
             string docKey = ClashEngine.DocKey(doc);
             set = set ?? settings.Active;
             string sig = ContextSignature(settings, set);
+            ScanContext hit = null;
 
             lock (CacheGate)
             {
@@ -433,7 +540,7 @@ namespace LiveClash.Core
                 if (_cacheDocKey != docKey) { _cache.Clear(); _cacheDocKey = docKey; }
 
                 CacheEntry e;
-                if (_cache.TryGetValue(sig, out e) && (DateTime.UtcNow - e.AtUtc) < CacheTtl)
+                if (_cache.TryGetValue(sig, out e) && (DateTime.UtcNow - e.AtUtc) < CollectionFailures.ExpiryFor(e.Ctx == null ? 0 : e.Ctx.Unread.Count, CacheTtl))
                 {
                     // VALIDATE EVERY LINK BEFORE HANDING THE CACHE OUT, not just the scope
                     // signature and the age. A link reload or unload closes that link's
@@ -464,13 +571,22 @@ namespace LiveClash.Core
                             var linkDoc = kv.Key == null ? null : kv.Key.Document;
                             if (linkDoc == null || !linkDoc.IsValidObject) { linksOk = false; break; }
                         }
-                    if (linksOk) return e.Ctx;
+                    if (linksOk) hit = e.Ctx;
                 }
+            }
+
+            if (hit != null)
+            {
+                // Outside the lock: building a source index the first time a SECOND set (same targets, other sources)
+                // asks for this shared context is the slow part.
+                EnsureHostSources(hit, doc, settings, set);
+                return hit;
             }
 
             // Build outside the lock — it is the slow part, and a duplicate build
             // under contention is harmless.
             var ctx = BuildContext(doc, settings, set);
+            EnsureHostSources(ctx, doc, settings, set);
 
             lock (CacheGate)
             {
@@ -484,6 +600,21 @@ namespace LiveClash.Core
             }
 
             return ctx;
+        }
+
+        /// <summary>
+        /// Make sure the context holds the source index the REVERSE check needs for this set. Only when there is
+        /// something to check: host-vs-host on, with both sources and targets. Built here, at the idle warm-up that
+        /// builds the context, so the first live edit of a target never pays for it inside its own transaction.
+        /// </summary>
+        private static void EnsureHostSources(ScanContext ctx, Document doc, ClashSettings settings, ClashSet set)
+        {
+            if (ctx == null || set == null || settings == null) return;
+            if (!settings.CheckHostVsHost) return;
+            if (set.SourceCategories.Count == 0 || set.TargetCategories.Count == 0) return;
+            if (ClashEngine.ReverseIsRedundant(set)) return;   // the reverse check can find nothing here: no second index (review L3)
+            try { ctx.HostSourceIndex(doc, set.SourceCategories); }
+            catch (Exception ex) { Log.Warn("Source index for the reverse check failed", ex); }
         }
 
         /// <summary>
@@ -646,7 +777,11 @@ namespace LiveClash.Core
                 if (deleted != null)
                     foreach (var id in deleted)
                         foreach (var e in entries)
-                            if (e.Ctx != null && e.Ctx.HostTargets != null) e.Ctx.HostTargets.Remove(id);
+                        {
+                            if (e.Ctx == null) continue;
+                            if (e.Ctx.HostTargets != null) e.Ctx.HostTargets.Remove(id);
+                            e.Ctx.RemoveHostSource(id);
+                        }
 
                 if (addedOrModified != null)
                 {
@@ -660,7 +795,13 @@ namespace LiveClash.Core
 
                         foreach (var e in entries)
                         {
-                            var index = e.Ctx != null ? e.Ctx.HostTargets : null;
+                            if (e.Ctx == null) continue;
+
+                            // The source indexes (the reverse check) are patched whether or not this entry has a target
+                            // index: a changed SOURCE must be findable when a target next changes near it.
+                            e.Ctx.PatchHostSource(doc, id, valid, bic);
+
+                            var index = e.Ctx.HostTargets;
                             if (index == null) continue;
                             if (valid && e.Targets != null && e.Targets.Contains(bic))
                                 index.Insert(doc, id);
@@ -676,6 +817,18 @@ namespace LiveClash.Core
                 // let it rebuild rather than carry something inconsistent.
                 Log.Warn("Index patch failed; dropping cache", ex);
                 ClashEngine.InvalidateAll();
+            }
+        }
+
+        /// <summary>The labels the live (cached) contexts left unread: what the panel's strip shows. Empty when every cached context read everything.</summary>
+        public static List<string> UnreadNow()
+        {
+            lock (CacheGate)
+            {
+                var lists = new List<IList<string>>();
+                foreach (var e in _cache.Values)
+                    if (e != null && e.Ctx != null) lists.Add(e.Ctx.Unread);
+                return CollectionFailures.Union(lists);
             }
         }
 

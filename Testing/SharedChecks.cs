@@ -30,6 +30,17 @@ namespace LiveClash.Testing
             LogChecks.RunAll(check);
             FuzzChecks.RunAll(check);
             EdgeCaseChecks.RunAll(check);
+            ReviewChecksLivePathShared.RunAll(check);
+            FullCheckReviewLogicChecks.RunAll(check);   // review 2026-10-31, F2 (M2, M10, LOW-8)
+            LedgerReviewChecks.RunAll(check);
+            LedgerReviewR2Checks.RunAll(check);
+            LedgerReviewR3Checks.RunAll(check);
+            LedgerReviewR4Checks.RunAll(check);
+            LedgerReviewR8FilesChecks.RunAll(check);   // round 8, files builder: D3-4, D3-2 b/c, SP7, DL-f
+            UiOutcomeChecks.RunAll(check);
+            SessionHandlerLogicChecks.RunAll(check);   // second pass 2026-10-31, SP1
+            R8LiveChecks.RunAll(check);   // round 8, builder "live" (tests\evidence\liveclash\r8-live)
+            GroupLedgerChecks.RunAll(check);   // the overnight ModificationForbiddenException: groups a check leaves open
         }
     }
 }

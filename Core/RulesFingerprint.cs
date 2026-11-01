@@ -1,6 +1,3 @@
-using System;
-using System.Text;
-
 namespace LiveClash.Core
 {
     /// <summary>
@@ -14,26 +11,14 @@ namespace LiveClash.Core
     /// Built from exactly <see cref="FilterPreset.ShareableLines"/> so it changes precisely when
     /// an exported preset would, and never from anything a preset would not carry — the per-model
     /// identity claim (<see cref="ModelIdentity"/>) included, since that says which model owns the
-    /// settings file, not a rule.
+    /// settings file, not a rule. The hashing itself is in RulesFingerprint.Lines.cs.
     /// </summary>
-    public static class RulesFingerprint
+    public static partial class RulesFingerprint
     {
         public static string Of(ClashSettings s)
         {
             if (s == null) return "";
-            var sb = new StringBuilder();
-            foreach (var l in FilterPreset.ShareableLines(s))
-            {
-                // "activeset" is which tab happens to be selected in the Filter window — a
-                // navigation preference, not a rule. Every ENABLED set runs regardless of which
-                // one is active, so switching tabs used to change the fingerprint of two panels
-                // running IDENTICAL rules, which is exactly what this exists to rule out. Found
-                // reviewing the whole codebase, 2026-09-27 (my own gap from the round that added
-                // this file).
-                if (l.StartsWith("activeset=", StringComparison.Ordinal)) continue;
-                sb.Append(l); sb.Append('\n');
-            }
-            return ShortHash.Of(sb.ToString());
+            return OfLines(FilterPreset.ShareableLines(s));
         }
     }
 }

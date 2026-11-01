@@ -105,7 +105,15 @@ namespace LiveClash.Core
                 if (WasSampled) return _sampledSeconds;
                 if (SourceElements <= 0 || TargetElements <= 0) return 0;
                 double msPerSource = BaseMsPerSource + TargetElements * MsPerSourcePerTarget;
-                return SourceElements * msPerSource * DedupFactor / 1000.0;
+
+                // ONE SWEEP PER ENABLED SET. RunFullCheckAllSets runs each set over its own scope, so
+                // eight sets over the same categories are eight sweeps; the union counts above read
+                // them as one, and 8 equal sets showed Green (~13 s) for a run of ~104 s (review
+                // 2026-10-31, LOW-6). Each set's scope is at most the union, so this is an upper bound,
+                // the safe side for a warning (MeasureSampled sums per set when it runs). An estimate
+                // that does not say how many sets it covers counts as one.
+                int sweeps = Math.Max(1, EnabledSets);
+                return sweeps * SourceElements * msPerSource * DedupFactor / 1000.0;
             }
         }
 

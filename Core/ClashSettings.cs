@@ -30,7 +30,17 @@ namespace LiveClash.Core
         /// </summary>
         public static ClashSettings Current
         {
-            get { return _current ?? (_current = Load(SettingsPath)); }
+            get
+            {
+                if (_current == null)
+                {
+                    // Through the file rules, as SwitchTo does: this is the file Save() will write.
+                    var lines = _file.Open(SettingsPath, null);
+                    _current = lines == null ? new ClashSettings() : FromLines(lines);
+                }
+                else if (_file.Unreadable) RetryUnreadable();
+                return _current;
+            }
         }
 
         /// <summary>Master switch. When false the updater returns immediately.</summary>
@@ -340,7 +350,7 @@ namespace LiveClash.Core
             get
             {
                 var dir = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    LocalState.Root,   // the real local application data, or a dev job's scratch root (DM2)
                     "LiveClash");
                 try { Directory.CreateDirectory(dir); } catch { }
                 return dir;
@@ -384,6 +394,128 @@ namespace LiveClash.Core
         }
 
         /// <summary>
+        /// This model's settings file exists but could not be read: the tool runs on defaults, changes are
+        /// not saved, and the file is read again every few seconds (see <see cref="RetryUnreadable"/>).
+        /// </summary>
+        public static bool Unreadable { get { return _file.Unreadable; } }
+
+        /// <summary>The key (ClashEngine.DocKey) of the document these were last loaded for. A Save As carries them to the new
+        /// name only if this is the document being saved (LedgerProvenance, round 3b of the 2026-10-31 review).</summary>
+        public static string LoadedForDocKey { get; private set; }
+
+        /// <summary>
+        /// Raised with a sentence for the user when the settings go unreadable (changes paused, nothing
+        /// overwritten) and when they are read again. Once each, never on a repeated failed retry. The panel
+        /// shows it in its status line (review 2026-10-31 round 2, DN2).
+        /// </summary>
+        public static event Action<string> Notice;
+
+        private static string _lastNotice;
+
+        /// <summary>The sentence to show now while the settings are paused, or null. For a panel that was
+        /// created after the notice was raised.</summary>
+        public static string PausedNotice { get { return _file.Unreadable ? _lastNotice : null; } }
+
+        /// <summary>
+        /// Say something to the user in the panel's status line through <see cref="Notice"/>, without touching the "settings paused" sentence
+        /// (<see cref="PausedNotice"/>). For the stores' Save As carry (SP7), which must never lose a file without a word.
+        /// </summary>
+        internal static void SayToPanel(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            _undelivered.Raise(text, Notice);   // to the panel if one is listening, else kept for when it next appears (delta review L-4)
+        }
+
+        // Sentences raised while no panel was subscribed (the pane closed or behind a tab). The panel takes them when it next appears.
+        private static readonly NoticeHolder _undelivered = new NoticeHolder();
+
+        /// <summary>
+        /// The sentences raised through <see cref="Notice"/> (a Save As that could not carry a file, "read again; changes resume") while NOBODY was
+        /// subscribed, oldest first, at most the newest eight, a repeat straight after itself once (never null), and forget them. The panel calls
+        /// this where it catches up on <see cref="PausedNotice"/> and shows each in its status line. The sentence <see cref="PausedNotice"/> already
+        /// returns is left out, so it is not said twice.
+        /// </summary>
+        public static IList<string> TakeUndeliveredNotices()
+        {
+            var taken = _undelivered.Take();
+            var paused = PausedNotice;
+            if (paused == null) return taken;
+            var result = new List<string>();
+            foreach (var t in taken) if (!string.Equals(t, paused, StringComparison.Ordinal)) result.Add(t);
+            return result;
+        }
+
+        private static void RaiseNotice(string text)
+        {
+            _lastNotice = text;
+            _undelivered.Raise(text, Notice);   // to the panel if one is listening, else kept for when it next appears (delta review L-4)
+        }
+
+        /// <summary>
+        /// The rules for the file itself: reads that fail are not "no file", saves never write
+        /// defaults over a file that could not be read, writes are atomic. See RewrittenFile.
+        /// </summary>
+        private static RewrittenFile _file = MakeFile();
+
+        private static RewrittenFile MakeFile()
+        {
+            var f = new RewrittenFile("Settings", ResumeAdvice);
+            f.Notice += RaiseNotice;
+            return f;
+        }
+
+        /// <summary>
+        /// The defaults object a failed read left running, once a retry has replaced it with the real
+        /// settings. A window that was opened on it still holds it; saving it would write the defaults, and
+        /// whatever was edited into them, over the real file. <see cref="Save"/> refuses it.
+        /// </summary>
+        private static ClashSettings _superseded;
+
+        // Set when a retry swapped the defaults for the model's own settings: the rules in force have changed under the results.
+        // The getter that did the swap can run inside the updater, so it only SAYS so; the idle handler does the reset.
+        private static volatile bool _rulesReloaded;
+
+        private const string ResumeAdvice = " The rules in force may have changed, so the list is cleared: run a full check.";
+
+        /// <summary>A retry swapped the rules and the idle handler has not reset the results yet. Reading it does not take it (delta review 3, D3-1): the updater asks, and so does the queue.</summary>
+        public static bool RulesReloadPending { get { return _rulesReloaded; } }
+
+        /// <summary>
+        /// True once, after a retry swapped the defaults for the model's own settings: the rules in force changed under the listed clashes, so
+        /// the idle handler (LiveClashApp.HandlePendingRulesReload) must reset the results the way a Filter change does (delta review round 2, DM4).
+        /// The getter that did the swap can run inside the updater, so it only raises this flag.
+        /// </summary>
+        public static bool TakeRulesReloaded()
+        {
+            var was = _rulesReloaded;
+            _rulesReloaded = false;
+            return was;
+        }
+
+        /// <summary>This object is the defaults a failed read left running, replaced since by the model's own settings: saving it is refused.</summary>
+        public bool IsSuperseded { get { return ReferenceEquals(this, _superseded); } }
+
+        /// <summary>
+        /// Read the file again while it is marked unreadable. Every read of <see cref="Current"/> comes
+        /// through here, and the back-off inside RewrittenFile lets one in five seconds (then ten, twenty...)
+        /// do anything, with a single read attempt, so a file that stays locked costs next to nothing.
+        /// The verify tick reads Current, so this runs on it.
+        /// </summary>
+        public static void RetryUnreadable()
+        {
+            if (!_file.Unreadable) return;
+            var lines = _file.TryReopen();
+            if (lines == null) return;   // not due yet, still locked, or the file is gone (the defaults are then right)
+
+            var old = _current;
+            _current = FromLines(lines);
+            _superseded = old;
+            _rulesReloaded = true;   // the idle handler resets the results the way a Filter change does (LiveClashApp.HandlePendingRulesReload)
+            Log.Info("Settings: read this model's own file on a retry.");
+            ClashUpdater.RequestTriggerRebuild();   // the sets just changed under the triggers
+        }
+
+        /// <summary>
         /// Switch to a document's own settings. A model with none yet starts from the machine
         /// default rather than from nothing — inheriting a sensible starting point is fine, it is
         /// inheriting it SILENTLY AND FOREVER that was wrong. The first Save() writes the model's
@@ -391,21 +523,40 @@ namespace LiveClash.Core
         ///
         /// Cheap to call repeatedly, on purpose — see ClashStatusStore.LoadFor's class comment:
         /// this runs on the same 5-second background tick, and an unchanged document must cost
-        /// nothing beyond a couple of string compares.
+        /// nothing beyond a couple of string compares. The one exception: while the model's file
+        /// could not be read, each call tries it again.
         /// </summary>
         public static void LoadFor(Document doc)
         {
             RevitUser.Note(doc);
+            if (doc != null) LoadedForDocKey = ClashEngine.DocKey(doc);
 
-            string titleKey = null;
+            string identity, titleKey;
+            string[] titleLines;
+            bool titleExists;
+            string key = ResolveKey(doc, out identity, out titleKey, out titleExists, out titleLines);
+            if (string.IsNullOrEmpty(key)) return;
+
+            SwitchTo(key, identity, titleKey, titleExists, titleLines);
+        }
+
+        /// <summary>
+        /// The file key a document's settings live under: its title, unless the collision guard
+        /// gives it a key of its own. Null when the document has no usable title.
+        /// </summary>
+        private static string ResolveKey(Document doc, out string identity, out string titleKey, out bool titleExists, out string[] titleLines)
+        {
+            identity = null;
+            titleKey = null;
+            titleExists = false;
+            titleLines = null;
             try { if (doc != null && doc.IsValidObject) titleKey = ModelKey.FileSafe(doc); }
             catch (Exception ex) { Log.Warn("Could not derive a model key for settings", ex); }
-            if (string.IsNullOrEmpty(titleKey)) return;
+            if (string.IsNullOrEmpty(titleKey)) return null;
+            Log.NoteSensitive(titleKey);
 
-            string identity = ModelIdentity.Compute(doc);
+            identity = ModelIdentity.Compute(doc);
             string key;
-            string[] titleLines = null;
-            bool titleExists = false;
 
             if (titleKey == _guardTitleSeen && identity == _guardIdentitySeen)
             {
@@ -432,34 +583,115 @@ namespace LiveClash.Core
                 _guardIdentitySeen = identity;
                 _guardResolvedKey = key;
             }
+            Log.NoteSensitive(key);
+            return key;
+        }
 
-            if (key == _modelKey) return;               // already on this model
+        /// <summary>The second half of <see cref="LoadFor"/>, once the file key is known: point at that
+        /// model's file and read it. Split out so a check can drive it with a key of its own.</summary>
+        private static void SwitchTo(string key, string identity, string titleKey, bool titleExists, string[] titleLines)
+        {
+            var path = Path.Combine(SettingsDir, key + ".txt");
+            if (key == _modelKey && !_file.NeedsOpen(path)) return;   // already on this model, and it was read
+            bool retry = key == _modelKey;
 
             _modelKey = key;
             _identity = identity ?? "";
 
-            // Reuse the title file's lines already read above when the resolved key IS the title
-            // key (the common, no-collision case) and it genuinely exists — avoids reading the
-            // same bytes twice, the way ClashStatusStore/ResolvedLog already do.
-            if (key == titleKey && titleExists && titleLines != null)
+            // Reuse the title file's lines already read by the guard when the resolved key IS the title
+            // key (the common, no-collision case) and it genuinely exists — avoids reading the same
+            // bytes twice, the way ClashStatusStore/ResolvedLog already do. A failed guard read leaves
+            // them null, and Open reads (and retries) the file itself.
+            var lines = _file.Open(path, key == titleKey && titleExists ? titleLines : null);
+            if (lines != null)
             {
-                _current = FromLines(titleLines);
-                Log.Info("Settings: loaded this model's own file, " + Path.Combine(SettingsDir, key + ".txt"));
+                var old = _current;
+                _current = FromLines(lines);
+                if (retry) { _superseded = old; _rulesReloaded = true; }
+                Log.Info("Settings: " + (retry ? "read this model's own file on a retry, " : "loaded this model's own file, ") + path);
+                if (retry) ClashUpdater.RequestTriggerRebuild();   // the sets just changed under the triggers
+            }
+            else if (_file.Unreadable)
+            {
+                // Review 2026-10-31, M9. Run on defaults for now, but RewrittenFile refuses to save
+                // them over the real file, and RetryUnreadable (from Current, every few seconds) reads it again. A retry that
+                // fails again keeps whatever is in memory.
+                if (!retry)
+                {
+                    _current = Load(DefaultSettingsPath);
+                    Log.Warn("Settings: this model's file could not be read; running on defaults, NOT saving, retrying every few seconds.");
+                }
             }
             else
             {
-                var path = SettingsPath;
-                bool own = File.Exists(path);
-                _current = Load(own ? path : DefaultSettingsPath);
-
-                Log.Info("Settings: " + (own
-                    ? "loaded this model's own file, " + path
-                    : "no file for '" + key + "' yet; seeded from " + DefaultSettingsPath));
+                _current = Load(DefaultSettingsPath);
+                Log.Info("Settings: no file for this model yet; seeded from " + DefaultSettingsPath);
             }
         }
 
-        public void Save()
+        /// <summary>
+        /// The active model was saved under a new name (Save As). Its settings are carried to the new
+        /// name and stay what they were: before this, the new title had no file, so the sets, rules and
+        /// link exclusions reset to the machine defaults, and narrower default sources missed clashes
+        /// from then on (review 2026-10-31, M4; the half of 2026-09-27 R04 that was still open).
+        /// A file already at the new name is kept as .bak. If the settings cannot be carried (the file
+        /// was never read), this falls back to an ordinary load of the new name.
+        /// </summary>
+        [RevitBound]
+        public static void FollowSaveAs(Document doc)
         {
+            if (doc != null) LoadedForDocKey = ClashEngine.DocKey(doc);   // ModelLedgers.FollowSaveAs has shown these are the saved document's
+            string identity, titleKey;
+            string[] titleLines;
+            bool titleExists;
+            string key = ResolveKey(doc, out identity, out titleKey, out titleExists, out titleLines);
+            if (string.IsNullOrEmpty(key) || key == _modelKey) return;
+
+            var cur = _current;
+            if (cur != null && !string.IsNullOrEmpty(_modelKey))
+            {
+                var newFile = Path.Combine(SettingsDir, key + ".txt");
+                if (_file.Unreadable)
+                {
+                    // SP7 (round 8): the file could not be read, so there is nothing parsed to carry (the defaults running now are not this
+                    // model's settings). The FILE is copied as it is and read again by the retry; if it cannot be copied the user is told.
+                    if (SaveAsCarry.CarryUnreadable(_file, newFile, identity, "settings", SayToPanel))
+                    {
+                        _modelKey = key;
+                        _identity = identity ?? "";
+                        Log.Info("Settings: the unreadable file was copied to the model's new name after Save As; it is read again on the retry.");
+                        return;
+                    }
+                }
+                else
+                {
+                    var lines = cur.ToLines();
+                    if (!string.IsNullOrEmpty(identity)) lines.Add(ModelIdentity.Line(identity));
+                    if (SaveAsCarry.CarryParsed(_file, newFile, lines, "settings", SayToPanel))
+                    {
+                        _modelKey = key;
+                        _identity = identity ?? "";
+                        Log.Info("Settings: carried to the model's new name after Save As.");
+                        return;
+                    }
+                }
+            }
+
+            SwitchTo(key, identity, titleKey, titleExists, titleLines);
+            ClashUpdater.RequestTriggerRebuild();
+        }
+
+        /// <summary>
+        /// Write these settings as the current model's file: atomically, and never over a file that
+        /// could not be read (see <see cref="SwitchTo"/>).
+        /// </summary>
+        public bool Save()
+        {
+            if (ReferenceEquals(this, _superseded))
+            {
+                Log.Warn("Settings: not saved. These are the defaults a failed read left running; the real settings have been read since, and saving these would replace them.");
+                return false;
+            }
             try
             {
                 var lines = ToLines();
@@ -467,10 +699,12 @@ namespace LiveClash.Core
                 // rule — it must never travel through FilterPreset, which exports exactly
                 // ToLines()'s own return value and nothing else.
                 if (!string.IsNullOrEmpty(_identity)) lines.Add(ModelIdentity.Line(_identity));
-                File.WriteAllLines(SettingsPath, lines.ToArray());
+                if (_file.Path != SettingsPath) _file.Open(SettingsPath, null);   // first save before any load
+                return _file.Save(lines);
             }
-            catch (Exception ex) { Log.Warn("Could not save settings", ex); }
+            catch (Exception ex) { Log.Warn("Could not save settings", ex); return false; }
         }
+
 
         /// <summary>
         /// The persisted form, as text lines. Split out from <see cref="Save"/> so the
@@ -481,6 +715,10 @@ namespace LiveClash.Core
         {
             var inv = System.Globalization.CultureInfo.InvariantCulture;
             var lines = new List<string>();
+
+            // The format version first: old builds ignore it, new builds check it (FilterFormat, round 2 DL7).
+            // Not in FilterPreset.CarryKeys, so a preset and the rules fingerprint never carry it.
+            lines.Add(FilterFormat.Line);
 
             // ---- global (whole-tool) settings: one copy, outside every set ----
             lines.Add("enabled=" + Enabled);
@@ -579,12 +817,15 @@ namespace LiveClash.Core
             }
         }
 
+        /// <summary>The machine defaults (or any file NOT this model's own): read only, never saved over,
+        /// so a failed read here is just defaults.</summary>
         private static ClashSettings Load(string path)
         {
             try
             {
-                if (!File.Exists(path)) return new ClashSettings();
-                return FromLines(File.ReadAllLines(path));
+                LedgerFile.ReadState state;
+                var lines = LedgerFile.Read(path, out state);
+                return lines == null ? new ClashSettings() : FromLines(lines);
             }
             catch (Exception ex)
             {
@@ -604,6 +845,12 @@ namespace LiveClash.Core
         /// </summary>
         public static ClashSettings FromLines(IEnumerable<string> rawLines)
         {
+            // Enumerated once: callers hand in arrays, but the signature promises nothing more.
+            var all = rawLines as IList<string> ?? new List<string>(rawLines);
+            var newer = FilterFormat.WarnIfNewer(all);
+            if (newer != null) Log.Warn(newer);
+            rawLines = all;
+
             var s = new ClashSettings();
             {
                 var built = new List<SetBlock>();

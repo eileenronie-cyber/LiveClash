@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace LiveClash.Core
 {
@@ -40,10 +41,25 @@ namespace LiveClash.Core
             public bool AllGone = true;
             public DateTime SinceUtc;
 
+            /// <summary>
+            /// The links (as compared, see ClashChange.Norm) whose latest load-state change was an unload or a delete. Their
+            /// rows are missing from the next check because the link is not there to check, which is not a fix. A later
+            /// reload or a new instance takes the link out again; a move does neither (review 2026-10-31, M3).
+            /// </summary>
+            public HashSet<string> NotLoaded { get; private set; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            /// <summary>
+            /// The part of <see cref="NotLoaded"/> whose latest change was the DELETION of the link instance: the checks drop their rows ("their
+            /// link was removed from the model"), so the summary says so instead of "not loaded" (round 8, P9-2). The link is gone, not unloaded.
+            /// </summary>
+            public HashSet<string> Removed { get; private set; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
             /// <summary>A copy that later changes to this one (another link noted) do not reach.</summary>
             internal Baseline Copy()
             {
                 var b = new Baseline { AllGone = AllGone, SinceUtc = SinceUtc };
+                b.NotLoaded = new HashSet<string>(NotLoaded, StringComparer.OrdinalIgnoreCase);
+                b.Removed = new HashSet<string>(Removed, StringComparer.OrdinalIgnoreCase);
                 b.Before = new List<ClashResult>(Before);
                 b.LinkNames = new List<string>(LinkNames);
                 b.Models = new HashSet<string>(Models, StringComparer.OrdinalIgnoreCase);
@@ -60,6 +76,15 @@ namespace LiveClash.Core
             public bool AllGone;
             public DateTime AtUtc;
 
+            /// <summary>Rows that left the list because their link was not loaded when the check ran: not checked, so never "cleared".</summary>
+            public List<ClashResult> NotChecked { get; } = new List<ClashResult>();
+
+            /// <summary>The changed links that were not loaded when the check ran.</summary>
+            public List<string> NotLoadedLinks { get; } = new List<string>();
+
+            /// <summary>The part of <see cref="NotLoadedLinks"/> whose instance was DELETED rather than unloaded.</summary>
+            public List<string> RemovedLinks { get; } = new List<string>();
+
             public bool IsNew(string key) { return Set != null && key != null && Set.NewKeys.Contains(key); }
 
             /// <summary>"Structure", "Structure and Architecture", "3 links".</summary>
@@ -74,13 +99,38 @@ namespace LiveClash.Core
                     if (AllGone)
                     {
                         int gone = s.Cleared.Count;
-                        return LinkText + (LinkNames.Count > 1 ? " are" : " is") + " no longer there: "
-                             + (gone == 0 ? "it had no clashes listed." : Plural(gone, "clash") + " with " + (LinkNames.Count > 1 ? "them" : "it") + " left the list.");
+                        int kept = NotChecked.Count;
+                        string them = LinkNames.Count > 1 ? "them" : "it";
+                        string head = LinkText + (LinkNames.Count > 1 ? " are" : " is") + " no longer there: ";
+                        if (kept == 0)
+                            return head + (gone == 0 ? "it had no clashes listed." : Plural(gone, "clash") + " with " + them + " left the list.");
+
+                        // Pairs of a link that is not loaded stay on the list as Unverified (the full check keeps what it
+                        // could not re-test), so "it had no clashes listed" would be untrue.
+                        var said = (gone > 0 ? Plural(gone, "clash") + " with " + them + " left the list and " : "")
+                                 + Plural(kept, "clash") + " with " + them + " could not be checked and "
+                                 + (kept == 1 ? "stays" : "stay") + " listed as Unverified.";
+                        return head + said;
                     }
                     var parts = new List<string>();
                     if (s.New.Count > 0) parts.Add(s.New.Count + " new");
                     if (s.Cleared.Count > 0) parts.Add(s.Cleared.Count + " cleared");
                     if (s.SeverityChanged.Count > 0) parts.Add(s.SeverityChanged.Count + " changed severity");
+                    // Rows of a link that was not loaded at the check left the list unchecked. Never "cleared": the
+                    // resolved record (which re-verifies) judged the same pairs Unknown and recorded none as fixed.
+                    if (NotChecked.Count > 0)
+                    {
+                        // Rows of a link whose instance was deleted were dropped by the check ("their link was removed from the model"); the rest are of
+                        // links that are only unloaded. Each is said the way it happened (round 8, P9-2).
+                        int removedRows = 0;
+                        foreach (var row in NotChecked)
+                            if (row != null && RemovedLinks.Contains(ClashChange.Norm(row.ModelName), StringComparer.OrdinalIgnoreCase)) removedRows++;
+                        var unloadedNames = new List<string>();
+                        foreach (var n in NotLoadedLinks) if (!RemovedLinks.Contains(n, StringComparer.OrdinalIgnoreCase)) unloadedNames.Add(n);
+                        int unloadedRows = NotChecked.Count - removedRows;
+                        if (unloadedRows > 0) parts.Add(unloadedRows + " not checked (" + NamesText(unloadedNames) + " not loaded)");
+                        if (removedRows > 0) parts.Add(removedRows + " pair(s) dropped: their link was removed from the model (" + NamesText(RemovedLinks) + ")");
+                    }
                     if (parts.Count == 0)
                     {
                         // Nothing compared is not the same as nothing changed: no row on either side belonged to the named
@@ -156,6 +206,17 @@ namespace LiveClash.Core
                 _pending.AllGone = false;
                 changed = true;
             }
+            if (kind == LinkWatch.Kind.Unloaded || kind == LinkWatch.Kind.InstanceDeleted)
+            {
+                changed |= _pending.NotLoaded.Add(display);
+                if (kind == LinkWatch.Kind.InstanceDeleted) changed |= _pending.Removed.Add(display);
+                else changed |= _pending.Removed.Remove(display);
+            }
+            else if (kind == LinkWatch.Kind.LoadedOrReloaded || kind == LinkWatch.Kind.InstanceAdded)
+            {
+                changed |= _pending.NotLoaded.Remove(display);
+                changed |= _pending.Removed.Remove(display);
+            }
             if (changed) Raise();
         }
 
@@ -181,6 +242,38 @@ namespace LiveClash.Core
                 AllGone = p.AllGone,
                 AtUtc = DateTime.UtcNow
             };
+            if (p.NotLoaded.Count > 0)
+            {
+                // A full check does not drop a listed pair it could not re-test: it puts it back as Unverified (delta
+                // review 2026-10-31, DL1, with F2's M2 fix). So the not-loaded link's rows are not missing but "changed
+                // severity" (Hard to Unverified) - and the link is not loaded, so they were not checked. Only an
+                // Unverified row moves; a real severity change stays where it was.
+                var changed = _summary.Set.SeverityChanged;
+                for (int i = changed.Count - 1; i >= 0; i--)
+                    if (changed[i].Value.Severity == ClashSeverity.Unverified
+                        && p.NotLoaded.Contains(ClashChange.Norm(changed[i].Value.ModelName)))
+                    {
+                        _summary.NotChecked.Insert(0, changed[i].Key);
+                        changed.RemoveAt(i);
+                    }
+            }
+            if (!p.AllGone && p.NotLoaded.Count > 0)
+            {
+                // Mixed changes (a reload, then an unload): the not-loaded link's rows move from Cleared to NotChecked.
+                var cleared = _summary.Set.Cleared;
+                for (int i = cleared.Count - 1; i >= 0; i--)
+                    if (p.NotLoaded.Contains(ClashChange.Norm(cleared[i].ModelName)))
+                    {
+                        _summary.NotChecked.Insert(0, cleared[i]);
+                        cleared.RemoveAt(i);
+                    }
+                foreach (var n in p.LinkNames)
+                    if (p.NotLoaded.Contains(n))
+                    {
+                        _summary.NotLoadedLinks.Add(n);
+                        if (p.Removed.Contains(n)) _summary.RemovedLinks.Add(n);
+                    }
+            }
             if (fullCheck) _pending = null;
             Raise();
         }

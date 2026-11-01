@@ -125,11 +125,13 @@ namespace LiveClash.Core
                 try { toHost = inst.GetTotalTransform(); } catch { toHost = Transform.Identity; }
                 if (toHost == null) toHost = Transform.Identity;
 
+                var name = DisplayName(host, inst, linkDoc);
+                if (name != FallbackName) { Log.NoteSensitive(name); Log.NoteSensitive(TrimRvt(name)); }   // the log must not write a link name as it is (round 2, DL8)
                 list.Add(new LinkContext
                 {
                     InstanceId = inst.Id,
                     Document = linkDoc,
-                    Name = DisplayName(host, inst, linkDoc),
+                    Name = name,
                     ToHost = toHost,
                     ToLink = toHost.Inverse
                 });
@@ -137,6 +139,8 @@ namespace LiveClash.Core
 
             return list;
         }
+
+        private const string FallbackName = "Linked model";
 
         private static string DisplayName(Document host, RevitLinkInstance inst, Document linkDoc)
         {
@@ -148,7 +152,7 @@ namespace LiveClash.Core
             catch { }
 
             try { if (!string.IsNullOrEmpty(linkDoc.Title)) return linkDoc.Title; } catch { }
-            return "Linked model";
+            return FallbackName;
         }
     }
 }

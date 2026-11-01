@@ -164,6 +164,35 @@ namespace LiveClash.UI
                 ClashStatusStore.Instance.Changed -= OnChanged;
                 ResolvedLog.Changed -= OnChanged;
             };
+
+            // The ledgers switch model without raising Changed, so a window left open across a
+            // switch went on listing the old model's records, and a click selected those ids in the
+            // new model. The panel calls ModelSwitched; this catches any switch it did not see.
+            Activated += delegate { if (LedgersMoved()) Reload(); };
+        }
+
+        /// <summary>Called by the panel when the active model changed: these rows belong to the old one.</summary>
+        internal void ModelSwitched()
+        {
+            try
+            {
+                if (Dispatcher.CheckAccess()) Reload();
+                else Dispatcher.BeginInvoke(new Action(delegate { Reload(); }));
+            }
+            catch { }
+        }
+
+        /// <summary>The ledger files the rows were read from, captured with them.</summary>
+        private string _loadedFrom;
+
+        private static string LedgerFiles()
+        {
+            return (ClashStatusStore.Instance.CurrentFile ?? "") + "|" + (ResolvedLog.CurrentFile ?? "");
+        }
+
+        private bool LedgersMoved()
+        {
+            return !string.Equals(_loadedFrom, LedgerFiles(), StringComparison.OrdinalIgnoreCase);
         }
 
         private void OnChanged(object sender, EventArgs e)
@@ -177,6 +206,7 @@ namespace LiveClash.UI
             // Captured here, WITH the rows, so an export later says what THESE rows actually came
             // from even if the active document has since moved to a different model.
             _loadedStamp = CsvExport.StampNow(ClashSettings.ModelName);
+            _loadedFrom = LedgerFiles();
 
             _all.Clear();
             foreach (var r in ClashRecord.Build()) _all.Add(new Row { Rec = r });

@@ -11,6 +11,12 @@ namespace LiveClash.UI
 
         public const string PaneTitle = "Live Clash";
 
+        // The settings' holder of sentences said while nobody listened (L-4): Core/NoticeHolder.cs, read through ClashSettings.TakeUndeliveredNotices.
+        static ClashPaneProvider()
+        {
+            ClashPanel.UndeliveredNotices = LiveClash.Core.ClashSettings.TakeUndeliveredNotices;
+        }
+
         private static ClashPanel _panel;
 
         /// <summary>
@@ -21,7 +27,7 @@ namespace LiveClash.UI
         {
             get
             {
-                if (_panel == null) _panel = new ClashPanel();
+                if (_panel == null) { _panel = new ClashPanel(); _panel.ListenForLife(); }
                 return _panel;
             }
         }

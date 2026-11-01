@@ -56,12 +56,16 @@ namespace LiveClash.Core
             get
             {
                 var dir = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    LocalState.Root,   // the real local application data, or a dev job's scratch root (DM2)
                     "LiveClash", "status");
                 try { Directory.CreateDirectory(dir); } catch { }
                 return dir;
             }
         }
+
+        /// <summary>The key (ClashEngine.DocKey) of the document these were last loaded for. A Save As carries them to the new
+        /// name only if this is the document being saved (LedgerProvenance, round 3b of the 2026-10-31 review).</summary>
+        public string LoadedForDocKey { get; private set; }
 
         public string CurrentFile
         {
@@ -354,26 +358,9 @@ namespace LiveClash.Core
             var text = new StringBuilder();
             foreach (var l in lines) text.AppendLine(l);
 
-            for (int attempt = 0; attempt < 5; attempt++)
-            {
-                try
-                {
-                    bool fresh = !File.Exists(path);
-                    if (fresh) File.AppendAllText(path, Header());
-                    File.AppendAllText(path, text.ToString());
-                    return;
-                }
-                catch (IOException)
-                {
-                    System.Threading.Thread.Sleep(20 * (attempt + 1));
-                }
-                catch (Exception ex)
-                {
-                    Log.Warn("Could not write clash status", ex);
-                    return;
-                }
-            }
-            Log.Warn("Could not write clash status: file stayed locked", null);
+            // Retried, header on a fresh file, and a newline first after a half-written last line
+            // (review 2026-10-31, LOW-3) - see LedgerFile.Append. It logs its own failure.
+            LedgerFile.Append(path, Header(), text.ToString());
         }
 
         private string Header()
@@ -402,11 +389,24 @@ namespace LiveClash.Core
         public void LoadFor(Document doc)
         {
             RevitUser.Note(doc);
+            if (doc != null) LoadedForDocKey = ClashEngine.DocKey(doc);
 
-            string titleKey = doc == null ? null : ModelKey.FileSafe(doc);
-            string identity = doc == null ? null : ModelIdentity.Compute(doc);
+            string titleKey, identity;
+            string[] titleLines;
+            string key = ResolveKey(doc, out titleKey, out identity, out titleLines);
+            Load(key, identity, titleKey, titleLines);
+        }
+
+        /// <summary>
+        /// The file key a document's decisions live under: its title, unless the collision guard gives
+        /// it a key of its own. <paramref name="titleLines"/> is the title file when the guard read it.
+        /// </summary>
+        private string ResolveKey(Document doc, out string titleKey, out string identity, out string[] titleLines)
+        {
+            titleKey = doc == null ? null : ModelKey.FileSafe(doc);
+            identity = doc == null ? null : ModelIdentity.Compute(doc);
+            titleLines = null;
             string key;
-            string[] titleLines = null;
 
             if (titleKey == _guardTitleSeen && identity == _guardIdentitySeen)
             {
@@ -435,7 +435,26 @@ namespace LiveClash.Core
                 _guardIdentitySeen = identity;
                 _guardResolvedKey = key;
             }
+            if (!string.IsNullOrEmpty(titleKey)) Log.NoteSensitive(titleKey);
+            if (!string.IsNullOrEmpty(key)) Log.NoteSensitive(key);
+            return key;
+        }
 
+        /// <summary>
+        /// The file of the last load could not be read (another session held it past the retry). The
+        /// decisions in memory are then missing, Gone events are not written for them, and reopened
+        /// clashes stay hidden - so the next LoadFor for the same model reads it again instead of
+        /// answering "already loaded" for the rest of the session (review 2026-10-31, LOW-12).
+        /// </summary>
+        private bool _loadFailed;
+
+        // How soon a failed read is tried again. A ledger that stays locked used to cost its full retry (about 300 ms)
+        // on EVERY 5-second tick, on the UI thread (review 2026-10-31 round 2, DL9).
+        private readonly RetryBackoff _retryBackoff = new RetryBackoff();
+
+        private void Load(string key, string identity, string titleKey, string[] titleLines)
+        {
+            bool retry;
             lock (_gate)
             {
                 // NOTE: a _rawTitle field used to be captured here, to "make title drift
@@ -444,10 +463,19 @@ namespace LiveClash.Core
                 // like a working diagnostic. If recording the raw doc.Title is wanted (it
                 // is relevant to how detached/local suffixes fork a ledger), the missing
                 // half is in Header(), not here.
-                if (_modelKey == key) return;   // same model, nothing to reload
-                _modelKey = key;
-                _identity = identity ?? "";
-                _byKey.Clear();
+                if (_modelKey == key && !_loadFailed) return;   // same model, nothing to reload
+                if (_modelKey == key && !_retryBackoff.Due()) return;   // failed recently: not yet
+                retry = _modelKey == key;
+                if (!retry)
+                {
+                    _modelKey = key;
+                    _identity = identity ?? "";
+                    _byKey.Clear();
+                    _retryBackoff.Succeeded();
+                }
+                // A retry replays INTO what is held: anything decided since was appended to the same
+                // file (or, if that failed too, is still only here), and the replay's clock rule merges.
+                _loadFailed = false;
             }
 
             if (string.IsNullOrEmpty(key)) return;
@@ -455,18 +483,23 @@ namespace LiveClash.Core
             try
             {
                 var path = CurrentFile;
-                if (path == null || !File.Exists(path))
-                {
-                    Log.Info("Clash status: no file yet for '" + key + "'.");
-                    return;
-                }
-
                 int events, legacy, repaired;
 
                 // Reuse the title file's lines already read above when the resolved key IS the
                 // title key (the common, no-collision case) — the collision path reads its own,
-                // different file.
-                var lines = (key == titleKey && titleLines != null) ? titleLines : File.ReadAllLines(path);
+                // different file. A failed guard read leaves them null and the file is read here.
+                var state = LedgerFile.ReadState.Read;
+                var lines = (key == titleKey && titleLines != null) ? titleLines : LedgerFile.Read(path, out state, retry ? 1 : 5);   // a retry on a tick makes one attempt
+                if (lines == null)
+                {
+                    if (state == LedgerFile.ReadState.Failed)
+                    {
+                        lock (_gate) { _loadFailed = true; _retryBackoff.Failed(); }
+                        if (!retry) Log.Warn("Clash status: could not read the file for this model; its decisions are missing until it can be read, tried again on the next load.");
+                    }
+                    else Log.Info("Clash status: no file yet for this model.");
+                    return;
+                }
 
                 // The replay itself lives in ClashStatusReplay: it is pure, and the
                 // ordering rules in it are the part that has repeatedly been wrong, so it
@@ -474,21 +507,77 @@ namespace LiveClash.Core
                 // genuinely belongs to a store — the path, the lock and the event.
                 lock (_gate)
                 {
+                    _retryBackoff.Succeeded();   // under the lock Failed() runs under (delta review round 2, DL-k)
                     ClashStatusReplay.Replay(
                         lines, _byKey, out events, out legacy, out repaired);
                 }
 
                 Log.Info("Clash status: replayed " + events + " event(s) -> "
                          + Count + " decision(s) for '" + key + "'."
+                         + (retry ? " (read on a retry)" : "")
                          + (repaired > 0
                             ? "  " + repaired + " line(s) repaired on read (char+long separator bug; "
                               + "host ids were stored 18 too high and glued to the name)."
                             : ""));
+                if (retry) Raise();
             }
             catch (Exception ex)
             {
                 Log.Warn("Could not load clash status", ex);
             }
+        }
+
+        /// <summary>
+        /// The ACTIVE model was saved under a new name (Save As). Its decisions go with it: the file is
+        /// carried to the new key (LedgerFile.CopyOver: atomic, and a file already at the new name is
+        /// kept as .bak, never merged), and what is held in memory stays. Before this the store
+        /// re-keyed to an empty file and every decision vanished from the panel (review 2026-10-31,
+        /// M4). Falls back to an ordinary load of the new name when the file cannot be carried, or was
+        /// never read.
+        /// </summary>
+        [RevitBound]
+        public void FollowSaveAs(Document doc)
+        {
+            if (doc != null) LoadedForDocKey = ClashEngine.DocKey(doc);   // ModelLedgers.FollowSaveAs has shown these are the saved document's
+            string titleKey, identity;
+            string[] titleLines;
+            string key = ResolveKey(doc, out titleKey, out identity, out titleLines);
+            string from;
+            bool failed;
+            lock (_gate)
+            {
+                if (string.IsNullOrEmpty(key) || key == _modelKey) return;
+                from = CurrentFile;
+                failed = _loadFailed;
+            }
+            var dest = Path.Combine(Folder, key + ".txt");
+
+            if (!failed)
+            {
+                if (from != null && SaveAsCarry.CarryReadable(from, dest, identity, "triage", ClashSettings.SayToPanel))
+                {
+                    lock (_gate)
+                    {
+                        _modelKey = key;
+                        _identity = identity ?? "";
+                    }
+                    Log.Info("Clash status: " + Count + " decision(s) carried to the model's new name after Save As.");
+                    return;
+                }
+            }
+            else if (SaveAsCarry.CarryUnreadable(from, dest, identity, "triage", ClashSettings.SayToPanel))
+            {
+                // SP7 (round 8): the load had failed, so the decisions are not in memory; the FILE is copied as it is. The store stays flagged,
+                // and the next LoadFor of the new name reads the copy (the back-off decides when).
+                lock (_gate)
+                {
+                    _modelKey = key;
+                    _identity = identity ?? "";
+                }
+                Log.Info("Clash status: the unreadable triage file was copied to the model's new name after Save As; it is read again on the retry.");
+                return;
+            }
+            Load(key, identity, titleKey, titleLines);
         }
 
         private void Raise()

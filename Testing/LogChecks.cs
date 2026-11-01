@@ -110,14 +110,14 @@ namespace LiveClash.Testing
                 }
                 var text = File.ReadAllText(logFile);
                 check(P + "a shared file still locked after the retry reads as nothing, and says so as a warning",
-                    lines == null && text.Contains("Could not read " + held + ": file stayed locked"));
+                    lines == null && text.Contains(Log.Scrub("Could not read " + held + ": file stayed locked")));   // as scrubbed (review LOW-11)
                 check(P + "a claim on a file still locked after the retry is given up with a warning, not lost silently",
-                    text.Contains("Could not claim " + held + " for this model: file stayed locked")
+                    text.Contains(Log.Scrub("Could not claim " + held + " for this model: file stayed locked"))
                     && Log.WarningCount == w0 + 2 && !File.ReadAllText(held).Contains("def"));
 
                 ModelIdentity.Claim(dir, "def");   // a folder: not an IOException, so no retry
                 check(P + "a claim that cannot be written at all is logged with the reason",
-                    File.ReadAllText(logFile).Contains("Could not claim " + dir + " for this model") && Log.WarningCount == w0 + 3);
+                    File.ReadAllText(logFile).Contains(Log.Scrub("Could not claim " + dir + " for this model")) && Log.WarningCount == w0 + 3);
             }
             finally
             {

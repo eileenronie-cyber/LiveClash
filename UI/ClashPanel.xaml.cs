@@ -60,6 +60,8 @@ namespace LiveClash.UI
             Cleared,
             /// <summary>The active model changed, so results and filter were reloaded for it.</summary>
             DocumentSwitched,
+            /// <summary>A full check ran and listed nothing, but part of the model or a link could not be read, so it is not a clean result (LOW-12).</summary>
+            CheckedWithGaps,
         }
 
         private EmptyReason _emptyReason = EmptyReason.NotCheckedYet;
@@ -73,6 +75,9 @@ namespace LiveClash.UI
             // the old settings would make the next full check report the settings' difference as the link's.
             if (reason == EmptyReason.FilterChanged || reason == EmptyReason.DropsChanged || reason == EmptyReason.ClearanceChanged)
                 ClashChangeTracker.Reset();
+
+            // An open record window lists the old model's records; its ledgers have just been reloaded for the new one.
+            if (reason == EmptyReason.DocumentSwitched && _recordWindow != null) _recordWindow.ModelSwitched();
             try
             {
                 if (Dispatcher.CheckAccess()) UpdateEmptyBanner();
@@ -154,6 +159,11 @@ namespace LiveClash.UI
                     title = "Cleared";
                     detail = "Live checking will list new clashes as you model. To see what is "
                            + "already there, sweep the model.";
+                    break;
+                case EmptyReason.CheckedWithGaps:
+                    title = "Nothing listed, but not everything was checked";
+                    detail = "The last full check could not read part of the model or a link (the status line names it), so nothing in it was "
+                           + "checked and this is not a clean result. Details are in the log. Run the full check again once it reads.";
                     break;
                 case EmptyReason.CheckedAndClean:
                     title = "No clashes found";
@@ -330,18 +340,159 @@ namespace LiveClash.UI
         {
             InitializeComponent();
             ThemeManager.Attach(this);
+
+            // Handlers are kept in fields so they can be taken back: a panel listens only while it is shown (Loaded to Unloaded). They used to
+            // be added here and never removed, so every panel ever built stayed reachable from the static events for the life of the session
+            // and kept receiving them, shown or not (round 8, DL-i and the three beside it).
             // Rows carry a few colours chosen in code (the status text); rebuild them when the theme flips.
-            ThemeManager.Changed += delegate { try { Dispatcher.BeginInvoke(new Action(Refresh)); } catch { } };
-
+            _onThemeChanged = delegate { try { Dispatcher.BeginInvoke(new Action(Refresh)); } catch { } };
             // A summary appeared, changed or went: redraw the strip and the rows that carry its marks.
-            ClashChangeTracker.Changed += delegate { try { Dispatcher.BeginInvoke(new Action(() => { RefreshWhatChanged(); Refresh(); })); } catch { } };
+            _onTrackerChanged = delegate { try { Dispatcher.BeginInvoke(new Action(() => { RefreshWhatChanged(); Refresh(); })); } catch { } };
+            _onStoreChanged = OnStoreChanged;
+            // The settings file could not be read (paused, nothing overwritten), or has been read again. Said once each, in the status
+            // line (review 2026-10-31 round 2, DN2). SetStatus marshals to this dispatcher itself.
+            _onSettingsNotice = text => { var line = _burst.Add(text, DateTime.UtcNow); if (line != null) ShowStatus(line); };
 
-            ClashResultStore.Instance.Changed += OnStoreChanged;
+            // A panel created after the notice was raised shows the current one.
+            var paused = ClashSettings.PausedNotice;
+            if (paused != null) SetStatus(paused);
 
             // Seeds the toggles and refreshes. The same call runs on every document
             // switch, so there is one definition of "make the controls say what the
             // settings say" rather than two that can drift apart.
             SyncToSettings();
+
+            // Shown: listen, and catch up with whatever changed while nobody was listening. Hidden: stop. What could not be read (a link whose
+            // elements could not be collected) stays said until it reads again, whichever path found it - the live path has no check to put it
+            // in (LOW-12); a cheap poll of CollectionFailures, here in the panel, so the engine and the updater are not touched.
+            Loaded += delegate { OnShown(); };
+            Unloaded += delegate { OnHidden(); };
+        }
+
+        private Action _onThemeChanged;
+        private Action _onTrackerChanged;
+        private EventHandler _onStoreChanged;
+        private Action<string> _onSettingsNotice;
+
+        /// <summary>Listen to the four static sources. Unsubscribes first, so Loaded firing twice (a pane moved, a tab switched) cannot add a second subscription.</summary>
+        private void Listen()
+        {
+            Unlisten();
+            ThemeManager.Changed += _onThemeChanged;
+            ClashChangeTracker.Changed += _onTrackerChanged;
+            ClashResultStore.Instance.Changed += _onStoreChanged;
+            ClashSettings.Notice += _onSettingsNotice;
+        }
+
+        private void Unlisten()
+        {
+            ThemeManager.Changed -= _onThemeChanged;
+            ClashChangeTracker.Changed -= _onTrackerChanged;
+            ClashResultStore.Instance.Changed -= _onStoreChanged;
+            ClashSettings.Notice -= _onSettingsNotice;
+        }
+
+        private void OnShown()
+        {
+            try
+            {
+                Listen();
+                // What changed while it was not listening: the rows, the "what changed" strip, and a settings file that is still paused.
+                Refresh();
+                RefreshWhatChanged();
+                var paused = ClashSettings.PausedNotice;
+                if (paused != null) SetStatus(paused);
+                ShowUndelivered();
+            }
+            catch (Exception ex) { Log.Warn("Panel catch-up on show failed", ex); }
+            StartCollectionNotice();
+        }
+
+        private void OnHidden()
+        {
+            try { if (!_listenForLife) Unlisten(); }
+            catch (Exception ex) { Log.Warn("Panel unsubscribe on hide failed", ex); }
+            if (!_listenForLife) StopCollectionNotice();
+        }
+
+        // ------------------------------------------------------------- collection notice (LOW-12)
+
+        /// <summary>
+        /// The sentences said while nobody listened (ClashSettings.TakeUndeliveredNotices, wired in ClashPaneProvider). Null = none.
+        /// Read when the panel appears and when the pane's panel starts listening (round 8 delta review, L-4).
+        /// </summary>
+        internal static Func<IList<string>> UndeliveredNotices;
+
+        /// <summary>The pane's own panel listens for the life of the session, whether or not Revit raises Loaded/Unloaded on it (M-1).</summary>
+        internal void ListenForLife()
+        {
+            _listenForLife = true;
+            try
+            {
+                Listen();
+                ShowUndelivered();
+            }
+            catch (Exception ex) { Log.Warn("Pane panel could not start listening", ex); }
+            StartCollectionNotice();   // the strip is polled whether or not Loaded ever arrives
+        }
+
+        private bool _listenForLife;
+
+        /// <summary>
+        /// What was said while nobody listened (a Save As that could not copy a file, before the pane existed or while it was away): the
+        /// settings' own queue, read through a seam so this file does not need to know it. Shown in the status line, oldest first (L-4).
+        /// </summary>
+        private void ShowUndelivered()
+        {
+            try
+            {
+                var read = UndeliveredNotices;
+                if (read == null) return;
+                var line = CheckOutcome.JoinNotices(read());
+                if (line.Length > 0) SetStatus(line);
+            }
+            catch (Exception ex) { Log.Warn("Panel could not read the undelivered notices", ex); }
+        }
+
+        private DispatcherTimer _collectionTimer;
+
+        private void StartCollectionNotice()
+        {
+            try
+            {
+                if (_collectionTimer == null)
+                {
+                    _collectionTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(5) };
+                    _collectionTimer.Tick += delegate { RefreshCollectionNotice(); };
+                }
+                _collectionTimer.Start();
+                RefreshCollectionNotice();
+            }
+            catch (Exception ex) { Log.Warn("Collection-notice start failed", ex); }
+        }
+
+        private void StopCollectionNotice()
+        {
+            try { if (_collectionTimer != null) _collectionTimer.Stop(); }
+            catch { }
+        }
+
+        /// <summary>
+        /// Show or hide the strip that says which host or link could not be read, and that live checking against it is off until it
+        /// reads again. Marshalled like SetStatus; public so a check can ask for it without waiting for the tick.
+        /// </summary>
+        public void RefreshCollectionNotice()
+        {
+            try
+            {
+                if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke((Action)RefreshCollectionNotice); return; }
+                if (CollectionNoticeBar == null) return;
+                var unread = ClashContext.UnreadNow();
+                var note = CheckOutcome.StandingNote(unread);
+                CollectionNoticeText.Text = note;
+                CollectionNoticeBar.Visibility = note.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+            }
+            catch (Exception ex) { Log.Warn("Collection-notice refresh failed", ex); }
         }
 
         /// <summary>
@@ -829,6 +980,14 @@ namespace LiveClash.UI
 
         public void SetStatus(string text)
         {
+            ShowStatus(_burst.Other(text));   // anything but a notice replaces the line and ends a burst of notices (R2-2)
+        }
+
+        /// <summary>Notice sentences said close together, joined (R2-2); everything else goes through <see cref="SetStatus"/>.</summary>
+        private readonly NoticeBurst _burst = new NoticeBurst();
+
+        private void ShowStatus(string text)
+        {
             try
             {
                 if (Dispatcher.CheckAccess()) StatusText.Text = text;
@@ -918,18 +1077,19 @@ namespace LiveClash.UI
             // Persist it. This did not, and Enabled was not written by Save() either,
             // so pausing live checking lasted exactly as long as the session and came
             // back on at the next start with nothing to say it had.
-            ClashSettings.Current.Save();
+            var notSaved = SaveNotice.After(ClashSettings.Current.Save(), false);   // DL-e: a refused save is said, not hidden
 
-            SetStatus(on
+            SetStatus((notSaved == null ? "" : notSaved + " ") + (on
                 ? "Live checking on."
-                : "Live checking paused — existing results kept.");
+                : "Live checking paused — existing results kept."));
         }
 
         private void GroupCheck_Changed(object sender, RoutedEventArgs e)
         {
             if (_syncing) return;   // the settings moved this, not the user
             ClashSettings.Current.GroupResults = GroupCheck.IsChecked == true;
-            ClashSettings.Current.Save();
+            var notSaved = SaveNotice.After(ClashSettings.Current.Save(), false);   // DL-e
+            if (notSaved != null) SetStatus(notSaved);
             Refresh();
         }
 
