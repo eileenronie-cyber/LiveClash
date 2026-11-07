@@ -124,6 +124,7 @@
     <Compile Include="..\..\Testing\R8LiveChecks.R5.cs" Link="Shared\R8LiveChecks.R5.cs" />
     <Compile Include="..\..\Testing\R8LiveChecks.R6.cs" Link="Shared\R8LiveChecks.R6.cs" />
     <Compile Include="..\..\Testing\R8LiveChecks.R7.cs" Link="Shared\R8LiveChecks.R7.cs" />
+    <Compile Include="..\..\Testing\FilterFreezeLogicChecks.cs" Link="Shared\FilterFreezeLogicChecks.cs" />
   </ItemGroup>
 
 </Project>

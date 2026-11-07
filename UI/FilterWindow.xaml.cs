@@ -28,12 +28,26 @@ namespace LiveClash.UI
             public BuiltInCategory Category { get; set; }
             public string Name { get; set; }
 
-            /// <summary>-1 when the model was not counted.</summary>
-            public int Count { get; set; }
+            private int _count;
+            private string _modelsText;
+
+            /// <summary>-1 when the model was not counted (yet: the window opens before the counts are in, U1).
+            /// Raises PropertyChanged, because the row is on screen when the number arrives.</summary>
+            public int Count
+            {
+                get { return _count; }
+                set { if (_count == value) return; _count = value; Raise("Count"); Raise("Label"); }
+            }
 
             /// <summary>The link(s) this category's elements come from, if any. Host is the
             /// unlabelled default, so a host-only category leaves this empty.</summary>
-            public string ModelsText { get; set; }
+            public string ModelsText
+            {
+                get { return _modelsText; }
+                set { if (_modelsText == value) return; _modelsText = value; Raise("ModelsText"); Raise("Label"); }
+            }
+
+            private void Raise(string p) { var h = PropertyChanged; if (h != null) h(this, new PropertyChangedEventArgs(p)); }
 
             /// <summary>"Walls  (1,234)" — the count is what tells you whether a category is
             /// worth ticking at all — plus the link name(s) when a link contributes, so a
@@ -82,6 +96,9 @@ namespace LiveClash.UI
         private ParameterFilter _tgtFilter;
 
         private readonly List<ParameterInfo> _catalog;
+
+        /// <summary>The category choices the caller passed, kept so the counts can be copied onto the rows when they arrive.</summary>
+        private List<CategoryChoice> _choices;
 
         // ------------------------------------------------------------ clash-set drafts
         //
@@ -190,6 +207,7 @@ namespace LiveClash.UI
                     categories.Add(new CategoryChoice { Category = c, Name = ClashSettings.DisplayName(c) });
             }
 
+            _choices = categories;
             foreach (var c in categories)
             {
                 _allSources.Add(new CategoryVm { Category = c.Category, Name = c.Name, Count = c.Count, ModelsText = c.ModelsText });
@@ -212,6 +230,292 @@ namespace LiveClash.UI
             // for the active set. Everything the old constructor did inline now runs here,
             // so it can run again on every set switch.
             ShowDraft(_activeDraft);
+        }
+
+        // ------------------------------------------------------------ work that arrives after the window is open (U1)
+        //
+        // Pressing Filter used to do all of this BEFORE the window showed - the whole-model category count (10-60 s cold), the parameter
+        // catalog, the per-link counts - on Revit's main thread, so Revit went grey ("Not Responding"). Now the window opens at once and a
+        // WorkPump, ticked from this window's own dispatcher, does it in slices of about PumpBudgetMs. That dispatcher IS Revit's UI/API
+        // thread, and we are still inside FilterHandler.Execute (the modal ShowDialog is nested in it), so the Revit API reads the
+        // steps make are in a valid API context, on the same thread. Nothing here starts a thread. FilterFreezeChecks proves it on every
+        // version (the tick's thread id equals the press's).
+        //
+        // What the user sees meanwhile is labelled (PrepStatus, "Links… (counting)"); nothing a person has done is touched when an
+        // item arrives: parameter names are only ever ADDED, and the category rows are updated, not rebuilt.
+
+        private const int PumpBudgetMs = 30;
+        private WorkPump _pump;
+        private System.Windows.Threading.DispatcherTimer _pumpTimer;
+        private bool _linksLoading;
+        private bool _paramsLoading;                // the parameter catalog is still being gathered: a scope worked out now is not final
+        private System.Windows.Threading.DispatcherFrame _waitFrame;   // set while a commit waits for the parameter catalog (FinishParamsIfPending)
+        private bool _isClosed;
+        private int _sameNameEvents;              // SelectionChanged events that carried the row's own parameter name (WPF showing a saved rule); the in-Revit checks read it
+        private bool _paramsFailed;                // the parameter step failed: the catalog is incomplete for good, so a scope can never be worked out from it
+        private bool _inTick;                      // re-entrancy guard for PumpTick
+        private string _note = "";                 // a sentence shown with the status line (a failure fallback, or why a commit was refused)
+        private bool _lastCommitStuck;
+        private int _pumpTicks, _pumpThread;
+        private string _prepText = "";
+
+        /// <summary>True while the pump still has work. The in-Revit checks wait on this.</summary>
+        internal bool IsPreparing { get { return _pump != null && !_pump.IsDone; } }
+
+        /// <summary>The status line, empty when nothing is loading.</summary>
+        internal string PrepText { get { return _prepText; } }
+
+        /// <summary>How many selection events carried a rule row's own parameter name (a combo box first showing a saved rule). 0 means WPF did not raise any.</summary>
+        internal int SameNameEvents { get { return _sameNameEvents; } }
+
+        /// <summary>The name of the pump step now running, or null when it is done (the in-Revit checks act when it is "Counting elements").</summary>
+        internal string PrepStep { get { return _pump == null ? null : _pump.CurrentName; } }
+
+        /// <summary>Timer ticks that drove the pump, and the managed thread they ran on.</summary>
+        internal int PumpTicks { get { return _pumpTicks; } }
+        internal int PumpThreadId { get { return _pumpThread; } }
+
+        /// <summary>The first error a step raised ("name: message"), or null.</summary>
+        internal string PumpError { get { return _pump == null ? null : _pump.Error; } }
+
+        /// <summary>
+        /// Hand the window the work to do after it is open. <paramref name="linksPending"/>: the Links… button reads "counting" until
+        /// <see cref="LinksReady"/>. Call before ShowDialog; the ticks start when the dialog starts pumping messages.
+        /// </summary>
+        internal void StartPrep(WorkPump pump, bool linksPending)
+        {
+            _pump = pump;
+            _linksLoading = linksPending;
+            _paramsLoading = pump != null && !pump.IsDone;
+            UpdateLinksButton();
+            ShowPrepText();
+            Closed += delegate { _isClosed = true; ReleaseWait(); };   // a commit waiting on the catalog must not wait on a window that is gone
+            if (pump == null || pump.IsDone) return;
+
+            _pumpTimer = new System.Windows.Threading.DispatcherTimer(System.Windows.Threading.DispatcherPriority.Background)
+            {
+                Interval = TimeSpan.FromMilliseconds(10)
+            };
+            _pumpTimer.Tick += PumpTick;
+            Closed += delegate { StopPump(); };
+            _pumpTimer.Start();
+        }
+
+        private void PumpTick(object sender, EventArgs e)
+        {
+            var pump = _pump;
+            if (pump == null || _inTick) return;   // a tick that arrives while one is running (a step that pumped messages) must not re-enter SlicedPass.Step
+            _inTick = true;
+            try
+            {
+                _pumpTicks++;
+                _pumpThread = Environment.CurrentManagedThreadId;
+
+                bool done;
+                try { done = pump.Tick(PumpBudgetMs); }
+                catch (Exception ex)
+                {
+                    // WorkPump records a step's own error; this is anything else. A broken pump must not leave the window half-loaded forever.
+                    Log.Warn("Filter window: the work pump failed", ex);
+                    pump.Cancel();
+                    done = true;
+                }
+                ShowPrepText();
+                if (done)
+                {
+                    if (_paramsLoading) ParamsFailed();   // the pump ended with the parameter step unfinished (it failed, or the pump broke)
+                    StopPump();
+                }
+            }
+            finally { _inTick = false; }
+        }
+
+        private void ReleaseWait()
+        {
+            var f = _waitFrame;
+            if (f != null) f.Continue = false;
+        }
+
+        /// <summary>
+        /// The parameter catalog (the list passed to the constructor) is complete. A rule whose parameter was picked while it was still
+        /// loading has a placeholder scope: work it out now from the finished catalog. A rule that came from a saved filter, or whose
+        /// parameter was picked after this, is not pending and is not touched.
+        /// </summary>
+        internal void ParamsReady()
+        {
+            _paramsLoading = false;
+            _paramsFailed = false;
+            bool any = false;
+            foreach (var vm in AllRuleRows())
+            {
+                if (!vm.ScopePending && !vm.RescopeOnReady) continue;
+                vm.RescopeOnReady = false;
+                ApplyScope(vm);
+                any = true;
+            }
+            if (any) { RefreshReadsAs(true); RefreshReadsAs(false); UpdateSummary(); }
+            ReleaseWait();
+        }
+
+        /// <summary>
+        /// The parameter step failed, so the catalog will never be complete. A rule picked meanwhile CANNOT be given a real scope, and
+        /// guessing Either could make it match nothing (Either reads the blank instance shadow first), so it stays pending: it is not
+        /// committed (see <see cref="FinishParamsIfPending"/>) until the person changes or removes it. Ends a commit that was waiting.
+        /// </summary>
+        internal void ParamsFailed()
+        {
+            _paramsLoading = false;
+            _paramsFailed = true;
+            foreach (var vm in AllRuleRows()) vm.RescopeOnReady = false;   // the stored scope stays: it is a real value, not a guess
+            ShowPrepText();
+            ReleaseWait();
+        }
+
+        /// <summary>A sentence shown with the status line (null clears it).</summary>
+        internal void SetNote(string note)
+        {
+            _note = note ?? "";
+            ShowPrepText();
+        }
+
+        /// <summary>As <see cref="SetNote"/>, and paints it NOW - for a note that must be on screen before a long call blocks the thread.</summary>
+        internal void SetNoteNow(string note)
+        {
+            SetNote(note);
+            try { Dispatcher.Invoke(new Action(delegate { }), System.Windows.Threading.DispatcherPriority.Render); } catch { }
+        }
+
+        /// <summary>The pending rules the failed parameter step left without a scope (empty while it is still loading or when none are pending).</summary>
+        private List<string> StuckRuleNames()
+        {
+            var names = new List<string>();
+            if (_paramsLoading) return names;
+            foreach (var vm in AllRuleRows()) if (vm.ScopePending && !string.IsNullOrWhiteSpace(vm.ParameterName)) names.Add(vm.ParameterName);
+            return names;
+        }
+
+        /// <summary>The sentence that says why a commit (OK, Export, a set switch, New set) was refused because the parameter list failed to load. Nothing when the
+        /// refusal had another reason (a closed window; a commit already waiting).</summary>
+        private void ShowRefusal()
+        {
+            if (_isClosed || !_lastCommitStuck) return;
+            MessageBox.Show(this, _note, "Live Clash", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
+        /// <summary>
+        /// A rule picked while the catalog was loading is about to be committed (OK, Export, or switching to another set). Its scope must
+        /// be the real one, not the placeholder, so wait until the catalog is complete and the scope has been worked out. The wait does
+        /// NOT run the rest of the parameter step in one go (that is the whole U1 freeze: ~8 s on a 360,000-element model): the window is
+        /// shut to input and the dispatcher keeps running, so the pump goes on slicing the work on this same thread, a collector at a
+        /// time, and the window keeps repainting ("Loading parameters... N%"). ParamsReady (a finished OR a failed parameter step, or the
+        /// pump ending) or the window closing ends the wait, and the window is enabled again whatever ended it. With nothing pending this
+        /// does nothing.
+        ///
+        /// Returns true when it is safe to commit the rules on screen; false when it is NOT, and the caller must commit nothing:
+        ///   * the window was closed during the wait (closing or cancelling saves nothing; the placeholder scope is never saved), or
+        ///   * a commit is already waiting (a second OK / Export while the first waits does nothing extra).
+        /// </summary>
+        private bool FinishParamsIfPending()
+        {
+            _lastCommitStuck = false;
+            if (_waitFrame != null || _isClosed) return false;
+            if (_paramsLoading)
+            {
+                bool pendingRow = false;
+                foreach (var vm in AllRuleRows()) if (vm.ScopePending || vm.RescopeOnReady) { pendingRow = true; break; }
+                if (pendingRow)
+                {
+                    var pump = _pump;
+                    if (pump == null || pump.IsDone) ParamsFailed();   // nothing will ever finish it
+                    else
+                    {
+                        var clock = System.Diagnostics.Stopwatch.StartNew();
+                        bool wasEnabled = IsEnabled;
+                        IsEnabled = false;
+                        _waitFrame = new System.Windows.Threading.DispatcherFrame();
+                        try { System.Windows.Threading.Dispatcher.PushFrame(_waitFrame); }
+                        finally { _waitFrame = null; try { IsEnabled = wasEnabled; } catch { } }
+                        Log.Info("Filter window: waited " + clock.ElapsedMilliseconds + " ms (UI kept running) for the parameter list before committing a rule picked while it loaded.");
+                        if (_isClosed) return false;
+                    }
+                }
+            }
+
+            // Whatever ended the wait: a rule that is STILL pending has no way to get a real scope (the parameter step failed). It is never
+            // committed as Either; the person is told which rules, and can change or remove them (U1 review L2).
+            var stuck = StuckRuleNames();
+            if (stuck.Count > 0)
+            {
+                _lastCommitStuck = true;
+                string why = _pump == null || string.IsNullOrEmpty(_pump.Error) ? "" : " (" + _pump.Error + ")";
+                SetNote("The parameter list could not be loaded" + why + ", so the scope of " + string.Join(", ", stuck.ToArray()) + " is unknown. Close Filter and open it again.");
+                return false;
+            }
+            return true;
+        }
+
+        private void StopPump()
+        {
+            var t = _pumpTimer;
+            _pumpTimer = null;
+            if (t != null) t.Stop();
+            if (_pump != null) _pump.Cancel();   // nothing more is asked of a closed window; a half-done count stays resumable in CategoryCatalog
+            if (_linksLoading) { _linksLoading = false; UpdateLinksButton(); }
+            ShowPrepText();
+        }
+
+        private void ShowPrepText()
+        {
+            var p = _pump;
+            string text = p == null ? "" : FilterPrep.StatusText(p.CurrentName, p.Fraction, p.IsDone, p.Error, p.Detail);
+            _prepText = string.IsNullOrEmpty(_note) ? text : (string.IsNullOrEmpty(text) ? _note : text + "  " + _note);
+            if (PrepStatus == null) return;
+            PrepStatus.Text = _prepText;
+            PrepStatus.Visibility = string.IsNullOrEmpty(_prepText) ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
+        }
+
+        /// <summary>The per-link counts have all arrived (they were filled into the dictionary passed to the constructor).</summary>
+        internal void LinksReady()
+        {
+            _linksLoading = false;
+            UpdateLinksButton();
+            UpdateSummary();
+        }
+
+        /// <summary>
+        /// A batch of parameter names has arrived. Only ever ADDS: a name already offered (any case) is left where it is, nothing is
+        /// removed or replaced, and the list is never reset, so a rule row's picked parameter and the user's selection survive. "Workset"
+        /// stays first; a new name goes in alphabetical position after it.
+        /// </summary>
+        internal void ApplyParamBatch(IEnumerable<string> names)
+        {
+            foreach (var n in FilterPrep.NamesToAdd(ParamNames, names))
+            {
+                int at = ParamNames.Count;
+                for (int i = 1; i < ParamNames.Count; i++)
+                    if (string.Compare(ParamNames[i], n, StringComparison.OrdinalIgnoreCase) > 0) { at = i; break; }
+                ParamNames.Insert(at, n);
+            }
+        }
+
+        /// <summary>
+        /// The counts (and the models that hold each category) have arrived in the <see cref="CategoryChoice"/> list the window was
+        /// given. Copy them onto the rows and re-apply the filter; ticks and the search text are the user's and are not touched.
+        /// </summary>
+        internal void RefreshCategoryRows()
+        {
+            if (_choices == null) return;
+            var byCat = new Dictionary<BuiltInCategory, CategoryChoice>();
+            foreach (var c in _choices) byCat[c.Category] = c;
+            foreach (var list in new[] { _allSources, _allTargets })
+                foreach (var vm in list)
+                {
+                    CategoryChoice c;
+                    if (!byCat.TryGetValue(vm.Category, out c)) continue;
+                    vm.Count = c.Count;
+                    vm.ModelsText = c.ModelsText;
+                }
+            FilterCategoryLists();
         }
 
         /// <summary>An editable in-window copy of one live set.</summary>
@@ -269,9 +573,10 @@ namespace LiveClash.UI
 
         /// <summary>Fold the visible edits back into the active draft, before switching
         /// away from it or on OK. The inverse of <see cref="ShowDraft"/>.</summary>
-        private void CommitVisibleToDraft()
+        private bool CommitVisibleToDraft()
         {
-            if (_activeDraft < 0 || _activeDraft >= _drafts.Count) return;
+            if (!FinishParamsIfPending()) return false;   // U1: a rule picked while the catalog loaded must not be committed with its placeholder scope
+            if (_activeDraft < 0 || _activeDraft >= _drafts.Count) return true;
             var d = _drafts[_activeDraft];
             d.SourceCats.Clear();
             foreach (var v in _allSources) if (v.IsChecked) d.SourceCats.Add(v.Category);
@@ -279,6 +584,7 @@ namespace LiveClash.UI
             foreach (var v in _allTargets) if (v.IsChecked) d.TargetCats.Add(v.Category);
             WriteRulesBack(true);   // writes into _srcFilter, which IS d.SrcFilter
             WriteRulesBack(false);
+            return true;
         }
 
         private void UpdateSetButtons()
@@ -295,14 +601,14 @@ namespace LiveClash.UI
             if (d == null) return;
             int i = _drafts.IndexOf(d);
             if (i < 0 || i == _activeDraft) return;
-            CommitVisibleToDraft();
+            if (!CommitVisibleToDraft()) { ShowRefusal(); return; }
             ShowDraft(i);
         }
 
         private void NewSet_Click(object sender, RoutedEventArgs e)
         {
             if (_drafts.Count >= MaxSets) return;
-            CommitVisibleToDraft();
+            if (!CommitVisibleToDraft()) { ShowRefusal(); return; }
 
             var name = PromptName("New clash set", "Set " + (_drafts.Count + 1));
             if (name == null) return;
@@ -529,6 +835,13 @@ namespace LiveClash.UI
         {
             if (LinksButton == null) return;
 
+            if (_linksLoading)
+            {
+                LinksButton.Content = "Links… (counting)";
+                LinksButton.IsEnabled = false;
+                return;
+            }
+
             int total = _linkCounts == null ? 0 : _linkCounts.Count;
             if (total == 0)
             {
@@ -620,16 +933,31 @@ namespace LiveClash.UI
                                 TextBox search, bool showEmpty)
         {
             var q = search == null ? "" : (search.Text ?? "").Trim();
-            view.Clear();
+            var wanted = new List<CategoryVm>();
             foreach (var v in all)
             {
                 // A category with nothing in it cannot clash. Ticked ones are always
                 // shown regardless — hiding a setting the user already made would
-                // mean silently dropping it on OK.
-                if (!showEmpty && v.Count == 0 && !v.IsChecked) continue;
-                if (q.Length > 0 && v.Name.IndexOf(q, StringComparison.OrdinalIgnoreCase) < 0) continue;
-                view.Add(v);
+                // mean silently dropping it on OK. A count that is not KNOWN yet (-1) is
+                // never "nothing in it": see FilterPrep.CategoryVisible.
+                if (FilterPrep.CategoryVisible(v.Count, v.IsChecked, showEmpty, v.Name, q)) wanted.Add(v);
             }
+            SyncView(view, wanted);
+        }
+
+        /// <summary>
+        /// Make <paramref name="view"/> equal <paramref name="wanted"/> WITHOUT clearing it. The counts now arrive while the window is open
+        /// (U1), and a Clear + re-add rebuilds every row: the scroll position goes back to the top and a row the user is pointing
+        /// at is replaced under the mouse. Removing only what leaves and inserting only what appears keeps every other row, and
+        /// the order, because both lists are in the order of the full list.
+        /// </summary>
+        private static void SyncView(ObservableCollection<CategoryVm> view, List<CategoryVm> wanted)
+        {
+            var keep = new HashSet<CategoryVm>(wanted);
+            for (int i = view.Count - 1; i >= 0; i--)
+                if (!keep.Contains(view[i])) view.RemoveAt(i);
+            for (int i = 0; i < wanted.Count; i++)
+                if (i >= view.Count || !ReferenceEquals(view[i], wanted[i])) view.Insert(i, wanted[i]);
         }
 
         // ------------------------------------------------------------ parameters
@@ -677,13 +1005,20 @@ namespace LiveClash.UI
                 + "This replaces the other side's rules and groups. Categories are left alone.",
                 "Live Clash", MessageBoxButton.OKCancel, MessageBoxImage.Question);
             if (answer != MessageBoxResult.OK) return;
+            MirrorRows(fromSource);
+        }
 
+        /// <summary>The copy itself, apart from the confirmation box (the in-Revit checks drive it directly).</summary>
+        internal void MirrorRows(bool fromSource)
+        {
+            var from = RulesFor(fromSource);
+            var to = RulesFor(!fromSource);
             to.Clear();
 
             int insert = 0;
             foreach (var r in from)
             {
-                var nr = new RuleRowVm { ParameterName = r.ParameterName, Scope = r.Scope };
+                var nr = new RuleRowVm { ParameterName = r.ParameterName, Scope = r.Scope, ScopePending = r.ScopePending, RescopeOnReady = r.RescopeOnReady };   // pending travels with the copy
                 nr.OperatorLabel = r.OperatorLabel;
                 foreach (var v in r.Values) nr.Values.Add(v);
                 nr.ValuesChanged();
@@ -698,7 +1033,7 @@ namespace LiveClash.UI
                 var ng = new GroupVm { Join = g.Join };
                 foreach (var r in g.Rules)
                 {
-                    var nr = new RuleRowVm { ParameterName = r.ParameterName, Scope = r.Scope };
+                    var nr = new RuleRowVm { ParameterName = r.ParameterName, Scope = r.Scope, ScopePending = r.ScopePending, RescopeOnReady = r.RescopeOnReady };   // pending travels with the copy
                     nr.OperatorLabel = r.OperatorLabel;
                     foreach (var v in r.Values) nr.Values.Add(v);
                     nr.ValuesChanged();
@@ -780,7 +1115,10 @@ namespace LiveClash.UI
         {
             try
             {
-                FilterPreset.Export(path, Staged(), ClashSettings.ModelName);
+                if (!FinishParamsIfPending()) { ShowRefusal(); return; }   // closed during the wait, a commit already waiting, or a rule without a scope: export nothing
+                var staged = Staged();
+                if (staged == null) { ShowRefusal(); return; }   // refused: nothing is exported
+                FilterPreset.Export(path, staged, ClashSettings.ModelName);
                 MessageBox.Show(this, "Filter exported to\n\n" + path,
                     "Live Clash", MessageBoxButton.OK, MessageBoxImage.Information);
             }
@@ -885,7 +1223,7 @@ namespace LiveClash.UI
         {
             var vm = new RuleRowVm();
             vm.ParameterName = ParamNames.Count > 0 ? ParamNames[0] : "";
-            vm.Scope = ScopeForParam(vm.ParameterName);
+            ApplyScope(vm);
             vm.OperatorLabel = "is one of";
             RulesFor(source).Add(vm);
             RefreshReadsAs(source);
@@ -941,7 +1279,7 @@ namespace LiveClash.UI
         {
             var vm = new RuleRowVm();
             vm.ParameterName = ParamNames.Count > 0 ? ParamNames[0] : "";
-            vm.Scope = ScopeForParam(vm.ParameterName);
+            ApplyScope(vm);
             vm.OperatorLabel = "is one of";
             return vm;
         }
@@ -950,7 +1288,19 @@ namespace LiveClash.UI
         {
             var vm = ((FrameworkElement)sender).DataContext as RuleRowVm;
             if (vm == null) return;
-            vm.Scope = ScopeForParam(vm.ParameterName);
+            // The same name again is not a pick: WPF raises SelectionChanged when a combo box first shows the row's saved parameter. It must not mark
+            // a saved rule PENDING (U1 review M2). But eb443e3 took the catalog's scope for such a row on first display (its catalog was complete at
+            // open), so a saved rule corrected itself; that is kept, in whichever order things arrive (U1 review N3): with the catalog complete the
+            // scope is taken now, exactly as eb443e3 did; while it is still loading the row is marked to be re-scoped when it is complete; after
+            // a failure the stored scope stays.
+            if (string.Equals(vm.ScopedFor, vm.ParameterName, StringComparison.Ordinal))
+            {
+                _sameNameEvents++;
+                if (_paramsLoading) vm.RescopeOnReady = true;
+                else if (!_paramsFailed) ApplyScope(vm);
+                return;
+            }
+            ApplyScope(vm);
         }
 
         private void BrowseRule_Click(object sender, RoutedEventArgs e)
@@ -1111,7 +1461,7 @@ namespace LiveClash.UI
         {
             // Fold the visible ticks and rules into the active draft first, so an edit you
             // have not pressed OK on still exports.
-            CommitVisibleToDraft();
+            if (!CommitVisibleToDraft()) return null;   // refused (closed during the wait, or a rule has no scope): nothing is built
 
             var staged = new ClashSettings();
             FillSetsFromDrafts(staged);
@@ -1139,7 +1489,22 @@ namespace LiveClash.UI
             private string _param = "";
             private string _opLabel = "is one of";
 
-            public ParamScope Scope = ParamScope.Either;
+            private ParamScope _scope = ParamScope.Either;
+
+            /// <summary>Where the value is read. Assigning it records WHICH parameter name this scope belongs to (<see cref="ScopedFor"/>), so a
+            /// selection event that carries the same name (a combo box showing a saved rule's parameter for the first time) is not a change.</summary>
+            public ParamScope Scope { get { return _scope; } set { _scope = value; ScopedFor = _param; } }
+
+            /// <summary>The parameter name <see cref="Scope"/> was last set for (null before any scope was set).</summary>
+            public string ScopedFor { get; set; }
+
+            /// <summary>The parameter was picked while the catalog was still loading, so <see cref="Scope"/> is a placeholder (Either)
+            /// until the finished catalog is known (FilterPrep.ScopeFor). Never set for a rule that came from a saved filter.</summary>
+            public bool ScopePending { get; set; }
+
+            /// <summary>A saved rule's combo box showed its parameter while the catalog was still loading: take the catalog's scope for it when it is
+            /// complete (what eb443e3 did on first display), and wait for that before committing.</summary>
+            public bool RescopeOnReady { get; set; }
             public ObservableCollection<string> Values { get; } = new ObservableCollection<string>();
 
             public string ParameterName
@@ -1305,13 +1670,26 @@ namespace LiveClash.UI
             if (seen.Add("Workset")) ParamNames.Insert(0, "Workset");
         }
 
-        private ParamScope ScopeForParam(string name)
+        /// <summary>Set the scope of a rule row from the catalog (U1: the catalog may still be loading - see FilterPrep.ScopeFor).</summary>
+        private void ApplyScope(RuleRowVm vm)
         {
-            if (string.Equals(name, "Workset", StringComparison.OrdinalIgnoreCase)) return ParamScope.Instance;
-            if (_catalog != null)
-                foreach (var p in _catalog)
-                    if (string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase)) return p.Scope;
-            return ParamScope.Either;
+            bool pending;
+            vm.Scope = FilterPrep.ScopeFor(vm.ParameterName, CatalogScopes(), !_paramsLoading && !_paramsFailed, out pending);
+            vm.ScopePending = pending;
+        }
+
+        private IEnumerable<KeyValuePair<string, ParamScope>> CatalogScopes()
+        {
+            if (_catalog == null) yield break;
+            foreach (var p in _catalog) yield return new KeyValuePair<string, ParamScope>(p.Name, p.Scope);
+        }
+
+        private IEnumerable<RuleRowVm> AllRuleRows()
+        {
+            foreach (var r in _sourceRules) yield return r;
+            foreach (var r in _targetRules) yield return r;
+            foreach (var g in _sourceGroups) foreach (var r in g.Rules) yield return r;
+            foreach (var g in _targetGroups) foreach (var r in g.Rules) yield return r;
         }
 
         /// <summary>Convert one side's filter into editable rule rows + locked audit rows.</summary>
@@ -1440,7 +1818,13 @@ namespace LiveClash.UI
 
         private void Ok_Click(object sender, RoutedEventArgs e)
         {
-            CommitVisibleToDraft();
+            if (_waitFrame != null) return;   // a first OK is waiting for the parameter list: a second click does nothing extra
+            if (!CommitVisibleToDraft())
+            {
+                // closed during the wait: nothing to commit to. Otherwise a rule has no scope because the parameter list failed to load: say so.
+                ShowRefusal();
+                return;
+            }
 
             // Every ENABLED set must be a real pair — both sides non-empty — or it can
             // never report anything and the empty side is almost always a mistake. A

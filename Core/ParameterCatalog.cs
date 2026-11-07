@@ -68,61 +68,125 @@ namespace LiveClash.Core
 
         public static List<ParameterInfo> Build(Document doc, IEnumerable<BuiltInCategory> categories)
         {
-            var byKey = new Dictionary<string, ParameterInfo>(StringComparer.OrdinalIgnoreCase);
-            if (doc == null || !doc.IsValidObject || categories == null) return Sorted(byKey);
+            var b = new Builder(doc, categories, null);
+            b.Step(int.MaxValue);
+            return b.Result();
+        }
 
-            var cats = new List<BuiltInCategory>(categories);
+        /// <summary>
+        /// The same discovery as <see cref="Build"/>, a unit at a time, so the Filter window can open at once and take the parameter
+        /// names as they arrive (U1). A UNIT is one category in one document - the host, then each loaded link - because a collector
+        /// is O(document) to construct (~165-250 ms on a 300,000-element model) and cannot be cut shorter. <see cref="Step"/> always
+        /// finishes the unit it is on, runs at least one per call, and stops once the budget is spent. The units are visited in
+        /// the order Build always visited them, so the answer is identical.
+        /// </summary>
+        public sealed class Builder
+        {
+            private readonly Document _doc;
+            private readonly List<BuiltInCategory> _cats;
+            private readonly List<LinkContext.ScanTarget> _docs;
+            private readonly Dictionary<string, ParameterInfo> _byKey = new Dictionary<string, ParameterInfo>(StringComparer.OrdinalIgnoreCase);
+            private int _docIx, _catIx;
+            private bool _final;
 
-            // Host plus every loaded link, so a parameter that only exists on link elements
-            // (a discipline modelled in its own linked file) is still offered. Sampling is
-            // per category PER document, so a link-only category is sampled from the link.
-            foreach (var st in LinkContext.ScanDocuments(doc))
-                foreach (var bic in cats)
+            public Builder(Document doc, IEnumerable<BuiltInCategory> categories, List<LinkContext.ScanTarget> scanDocs)
+            {
+                _doc = doc;
+                _cats = categories == null ? new List<BuiltInCategory>() : new List<BuiltInCategory>(categories);
+                // Host plus every loaded link, so a parameter that only exists on link elements (a discipline modelled in its
+                // own linked file) is still offered. Sampling is per category PER document, so a link-only category is sampled
+                // from the link.
+                _docs = (doc == null || !doc.IsValidObject || categories == null) ? new List<LinkContext.ScanTarget>() : (scanDocs ?? LinkContext.ScanDocuments(doc));
+            }
+
+            /// <summary>Units finished / units, 0..1.</summary>
+            public double Fraction
+            {
+                get
                 {
-                    List<Element> sample;
-                    try
+                    int total = _docs.Count * _cats.Count;
+                    if (total == 0 || IsDone) return 1.0;
+                    return (double)(_docIx * _cats.Count + _catIx) / total;
+                }
+            }
+
+            public bool IsDone { get { return _docIx >= _docs.Count || _cats.Count == 0; } }
+
+            /// <summary>Do at least one unit, and keep going until about <paramref name="budgetMs"/> has been spent. True when finished.</summary>
+            public bool Step(int budgetMs)
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                bool first = true;
+                while (!IsDone)
+                {
+                    if (!first && sw.ElapsedMilliseconds >= budgetMs) return false;
+                    first = false;
+                    Unit(_docs[_docIx], _cats[_catIx]);
+                    if (++_catIx >= _cats.Count) { _catIx = 0; _docIx++; }
+                }
+                return true;
+            }
+
+            /// <summary>Every parameter NAME found so far, once each, in no particular order (the window de-duplicates and orders).</summary>
+            public List<string> Names()
+            {
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var names = new List<string>();
+                foreach (var p in _byKey.Values) if (!string.IsNullOrEmpty(p.Name) && seen.Add(p.Name)) names.Add(p.Name);
+                names.Sort(StringComparer.OrdinalIgnoreCase);
+                return names;
+            }
+
+            /// <summary>The finished catalog, sorted, with the blank instance shadows dropped. Call once <see cref="IsDone"/>.</summary>
+            public List<ParameterInfo> Result()
+            {
+                if (!_final) { DropEmptyInstanceShadows(_byKey); _final = true; }
+                return Sorted(_byKey);
+            }
+
+            private void Unit(LinkContext.ScanTarget st, BuiltInCategory bic)
+            {
+                List<Element> sample;
+                try
+                {
+                    sample = new List<Element>();
+                    var it = new FilteredElementCollector(st.Doc)
+                        .OfCategory(bic)
+                        .WhereElementIsNotElementType()
+                        .GetElementIterator();
+                    it.Reset();
+                    while (it.MoveNext() && sample.Count < SamplePerCategory)
                     {
-                        sample = new List<Element>();
-                        var it = new FilteredElementCollector(st.Doc)
-                            .OfCategory(bic)
-                            .WhereElementIsNotElementType()
-                            .GetElementIterator();
-                        it.Reset();
-                        while (it.MoveNext() && sample.Count < SamplePerCategory)
-                        {
-                            var e = it.Current as Element;
-                            if (e != null) sample.Add(e);
-                        }
-                    }
-                    catch { continue; }
-
-                    if (sample.Count == 0) continue;
-                    string catName = ClashSettings.DisplayName(bic);
-                    try { if (sample[0].Category != null) catName = sample[0].Category.Name; } catch { }
-
-                    // Provenance lists LINKS only — the host is the unlabelled default, so a
-                    // host parameter shows no tag and a link-only one is called out.
-                    string prov = st.IsHost ? null : st.ModelName;
-                    foreach (var e in sample)
-                    {
-                        Collect(e, ParamScope.Instance, catName, prov, byKey);
-
-                        // Type lives in the ELEMENT's own document — the link's, for a link
-                        // element — so resolve it there, not in the host.
-                        Element type = null;
-                        try
-                        {
-                            var tid = e.GetTypeId();
-                            if (tid != null && tid != ElementId.InvalidElementId)
-                                type = st.Doc.GetElement(tid);
-                        }
-                        catch { }
-                        if (type != null) Collect(type, ParamScope.Type, catName, prov, byKey);
+                        var e = it.Current as Element;
+                        if (e != null) sample.Add(e);
                     }
                 }
+                catch { return; }
 
-            DropEmptyInstanceShadows(byKey);
-            return Sorted(byKey);
+                if (sample.Count == 0) return;
+                string catName = ClashSettings.DisplayName(bic);
+                try { if (sample[0].Category != null) catName = sample[0].Category.Name; } catch { }
+
+                // Provenance lists LINKS only - the host is the unlabelled default, so a
+                // host parameter shows no tag and a link-only one is called out.
+                string prov = st.IsHost ? null : st.ModelName;
+                foreach (var e in sample)
+                {
+                    Collect(e, ParamScope.Instance, catName, prov, _byKey);
+
+                    // Type lives in the ELEMENT's own document - the link's, for a link
+                    // element - so resolve it there, not in the host.
+                    Element type = null;
+                    try
+                    {
+                        var tid = e.GetTypeId();
+                        if (tid != null && tid != ElementId.InvalidElementId)
+                            type = st.Doc.GetElement(tid);
+                    }
+                    catch { }
+                    if (type != null) Collect(type, ParamScope.Type, catName, prov, _byKey);
+                }
+            }
         }
 
         /// <summary>

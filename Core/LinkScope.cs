@@ -35,45 +35,66 @@ namespace LiveClash.Core
         /// </summary>
         public static Dictionary<BuiltInCategory, int> CountByCategory(Document linkDoc)
         {
-            var counts = new Dictionary<BuiltInCategory, int>();
-            if (linkDoc == null || !linkDoc.IsValidObject) return counts;
-
-            var offerable = OfferableCategories(linkDoc);
-            if (offerable.Count == 0) return counts;
-
-            try
-            {
-                var it = new FilteredElementCollector(linkDoc)
-                    .WhereElementIsNotElementType()
-                    .GetElementIterator();
-                it.Reset();
-                while (it.MoveNext())
-                {
-                    var e = it.Current as Element;
-                    if (e == null) continue;
-
-                    Category cat;
-                    try { cat = e.Category; } catch { continue; }
-                    if (cat == null) continue;
-
-                    int id;
-                    try { id = (int)IdUtil.Value(cat.Id); } catch { continue; }
-                    if (!offerable.Contains(id)) continue;
-
-                    // Only geometry can clash — match the engine's own tests so the number
-                    // shown is the number that can produce a result.
-                    try { if (e.get_BoundingBox(null) == null) continue; } catch { continue; }
-                    try { if (PairSuppressor.IsIgnorableElement(e)) continue; } catch { continue; }
-
-                    var bic = (BuiltInCategory)id;
-                    int n;
-                    counts[bic] = counts.TryGetValue(bic, out n) ? n + 1 : 1;
-                }
-            }
-            catch { /* a link that will not enumerate simply shows no counts */ }
-
-            return counts;
+            var c = new Counter(linkDoc);
+            c.Step(int.MaxValue);
+            return c.Counts;
         }
+
+        /// <summary>
+        /// <see cref="CountByCategory"/> a slice at a time (U1): the pass over a link is the same one streamed walk, resumable, so the
+        /// Filter window can count each link in the gaps instead of before it opens. On a big link the one-shot pass is seconds
+        /// of a grey Revit (1.06 s for four links on Snowdon; far more on the 16-document model).
+        /// </summary>
+        public sealed class Counter
+        {
+            private readonly Dictionary<BuiltInCategory, int> _counts = new Dictionary<BuiltInCategory, int>();
+            private readonly HashSet<int> _offerable;
+            private readonly SlicedPass<Document, Element> _pass;
+
+            public Counter(Document linkDoc)
+            {
+                _offerable = new HashSet<int>();
+                if (linkDoc == null || !linkDoc.IsValidObject) return;
+                _offerable = OfferableCategories(linkDoc);
+                if (_offerable.Count == 0) return;
+
+                _pass = new SlicedPass<Document, Element>("link", new List<Document> { linkDoc },
+                    d => new ElementWalk(d), (ix, e) => Visit(e),
+                    () => System.Diagnostics.Stopwatch.GetTimestamp() * 1000L / System.Diagnostics.Stopwatch.Frequency, 1024);
+            }
+
+            /// <summary>Per category, so far. A link that will not enumerate simply shows the counts it reached.</summary>
+            public Dictionary<BuiltInCategory, int> Counts { get { return _counts; } }
+
+            /// <summary>Advance by about <paramref name="budgetMs"/>. True when this link is finished.</summary>
+            public bool Step(int budgetMs)
+            {
+                return _pass == null || _pass.Step(budgetMs);
+            }
+
+            private void Visit(Element e)
+            {
+                if (e == null) return;
+
+                Category cat;
+                try { cat = e.Category; } catch { return; }
+                if (cat == null) return;
+
+                int id;
+                try { id = (int)IdUtil.Value(cat.Id); } catch { return; }
+                if (!_offerable.Contains(id)) return;
+
+                // Only geometry can clash — match the engine's own tests so the number
+                // shown is the number that can produce a result.
+                try { if (e.get_BoundingBox(null) == null) return; } catch { return; }
+                try { if (PairSuppressor.IsIgnorableElement(e)) return; } catch { return; }
+
+                var bic = (BuiltInCategory)id;
+                int n;
+                _counts[bic] = _counts.TryGetValue(bic, out n) ? n + 1 : 1;
+            }
+        }
+
 
         /// <summary>
         /// The category ids the filter could actually select in this document — the same

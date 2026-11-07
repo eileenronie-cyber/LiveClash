@@ -79,6 +79,7 @@ namespace LiveClash.Testing
             R8LiveChecks.RunAll(check);   // round 8, builder "live" (tests\evidence\liveclash\r8-live)
             GroupLedgerChecks.RunAll(check);   // the overnight ModificationForbiddenException: groups a check leaves open
             MarkerRevitLogicChecks.RunAll(check);     // clash schedule slice 4a: parameter map, refusals, ownership, write filter
+            FilterFreezeLogicChecks.RunAll(check);   // U1: the work pump, the sliced pass, the signed cache, what the Filter window shows while it fills
         }
     }
 }

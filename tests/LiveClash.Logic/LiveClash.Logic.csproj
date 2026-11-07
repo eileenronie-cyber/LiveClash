@@ -84,6 +84,9 @@
     <!-- The idle tick's order as data, and the time-boxed slice (round 8): pure. -->
     <Compile Include="..\..\Core\IdleSchedule.cs" Link="Core\IdleSchedule.cs" />
     <Compile Include="..\..\Core\SliceBudget.cs" Link="Core\SliceBudget.cs" />
+    <Compile Include="..\..\Core\WorkPump.cs" Link="Core\WorkPump.cs" />
+    <Compile Include="..\..\Core\SlicedPass.cs" Link="Core\SlicedPass.cs" />
+    <Compile Include="..\..\Core\FilterPrep.cs" Link="Core\FilterPrep.cs" />
     <Compile Include="..\..\Core\WarnThrottle.cs" Link="Core\WarnThrottle.cs" />
     <Compile Include="..\..\Core\UndoPolicy.cs" Link="Core\UndoPolicy.cs" />
     <Compile Include="..\..\Core\CommittedDeletions.cs" Link="Core\CommittedDeletions.cs" />
