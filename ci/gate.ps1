@@ -174,6 +174,19 @@ if ($logic -ne 0) {
     $fail += $logic
 }
 
+# 2a. The same suite on .NET Framework 4.8, the runtime of Revit 2024 (its default number format differs from .NET 8's, for one). Full gate and CI only,
+# so the pre-push hook stays seconds. Own intermediate folder, so the .NET 8 build above is left as it is.
+if (-not $Quick) {
+    Write-Host ""
+    Write-Host "-- logic tests (headless) on .NET Framework 4.8 --" -ForegroundColor Cyan
+    & dotnet run --project (Join-Path $root 'tests\LiveClash.LogicTests') -c Release -p:LcNet48=true -p:BaseIntermediateOutputPath=obj\net48\
+    $logic48 = $LASTEXITCODE
+    if ($logic48 -ne 0) {
+        Write-Host ("LOGIC TESTS ON NET48 FAILED: {0} check(s)" -f $logic48) -ForegroundColor Red
+        $fail += $logic48
+    }
+}
+
 # 2b. Coverage of the Revit-free logic, with a ratchet threshold (ci\coverage.ps1), and
 # 2c. static analysis against its baseline (ci\analyze.ps1). Both headless; both skipped by -Quick
 # to keep the pre-push hook to seconds - CI runs them on every push.

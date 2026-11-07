@@ -84,6 +84,12 @@ namespace LiveClash.Core
         public string SetName { get; set; }
 
         /// <summary>
+        /// The other sets that also caught this pair (spec 4b.2): ordinal-sorted, distinct, never the stamping set. The
+        /// multi-set merge used to drop them; the clash schedule shows them in its "Also caught by" column.
+        /// </summary>
+        public System.Collections.Generic.List<string> AlsoSets { get; set; }
+
+        /// <summary>
         /// For a same-document pair the id order is normalised, so A-hits-B and
         /// B-hits-A collapse into one entry — otherwise moving each side of a clash
         /// in turn would list the same problem twice.
@@ -148,6 +154,7 @@ namespace LiveClash.Core
                 Insulated = Insulated,
                 Key = Key,
                 SetName = SetName,
+                AlsoSets = AlsoSets == null ? null : new System.Collections.Generic.List<string>(AlsoSets),
             };
 #if !LOGICTESTS_HEADLESS
             c.HostElementId = HostElementId;

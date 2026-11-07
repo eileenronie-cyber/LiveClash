@@ -17,7 +17,9 @@
 
   <PropertyGroup>
     <OutputType>Library</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <!-- The headless suite also runs on .NET Framework 4.8, the runtime of Revit 2024 (ci\gate.ps1, not -Quick): -p:LcNet48=true -->
+    <TargetFramework Condition="'$(LcNet48)' != 'true'">net8.0-windows</TargetFramework>
+    <TargetFramework Condition="'$(LcNet48)' == 'true'">net48</TargetFramework>
     <LangVersion>latest</LangVersion>
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>disable</Nullable>
@@ -35,7 +37,8 @@
   <ItemGroup>
     <!-- Reference-only Revit API: compiles against Element/Parameter/etc. with no Revit install.
          Flows to the test project, which needs the same metadata to compile the checks. -->
-    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2025.*" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2025.*" Condition="'$(LcNet48)' != 'true'" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2024.*" Condition="'$(LcNet48)' == 'true'" />
   </ItemGroup>
 
   <ItemGroup>
@@ -104,6 +107,38 @@
     <Compile Include="..\..\Core\RulesFingerprint.Lines.cs" Link="Core\RulesFingerprint.Lines.cs" />
     <!-- What Focus says it did (review 2026-10-31, M7): pure wording. -->
     <Compile Include="..\..\Core\FocusOutcome.cs" Link="Core\FocusOutcome.cs" />
+    <!-- Clash schedule (slice 1): the marker identity, record and text rules. Pure, no Revit. -->
+    <Compile Include="..\..\Core\ClashIdOf.cs" Link="Core\ClashIdOf.cs" />
+    <Compile Include="..\..\Core\IssueNumbers.cs" Link="Core\IssueNumbers.cs" />
+    <Compile Include="..\..\Core\MarkerRecord.cs" Link="Core\MarkerRecord.cs" />
+    <Compile Include="..\..\Core\GroupLabel.cs" Link="Core\GroupLabel.cs" />
+    <Compile Include="..\..\Core\MarkerSummary.cs" Link="Core\MarkerSummary.cs" />
+    <!-- Clash schedule UI (slice B): the Task-based action interface and plain data, the menu model and the row text. Pure. -->
+    <Compile Include="..\..\Core\ClashScheduleActions.cs" Link="Core\ClashScheduleActions.cs" />
+    <Compile Include="..\..\Core\ScheduleMenuModel.cs" Link="Core\ScheduleMenuModel.cs" />
+    <Compile Include="..\..\Core\RowScheduleText.cs" Link="Core\RowScheduleText.cs" />
+    <Compile Include="..\..\Core\RefreshPlanModel.cs" Link="Core\RefreshPlanModel.cs" />
+    <Compile Include="..\..\Core\ConfirmModel.cs" Link="Core\ConfirmModel.cs" />
+    <Compile Include="..\..\Core\AssignModel.cs" Link="Core\AssignModel.cs" />
+    <Compile Include="..\..\Core\ScheduleController.cs" Link="Core\ScheduleController.cs" />
+    <Compile Include="..\..\Core\RefreshPlanFactory.cs" Link="Core\RefreshPlanFactory.cs" />
+    <Compile Include="..\..\Core\ClashDedupe.cs" Link="Core\ClashDedupe.cs" />
+    <Compile Include="..\..\Core\RowBuilder.cs" Link="Core\RowBuilder.cs" />
+    <Compile Include="..\..\Core\PendingMap.cs" Link="Core\PendingMap.cs" />
+    <Compile Include="..\..\Core\MarkerIdentity.cs" Link="Core\MarkerIdentity.cs" />
+    <!-- Clash schedule (slice 4a): the pure half of the Revit side. -->
+    <Compile Include="..\..\Core\MarkerParameterMap.cs" Link="Core\MarkerParameterMap.cs" />
+    <Compile Include="..\..\Core\MarkerRefusals.cs" Link="Core\MarkerRefusals.cs" />
+    <Compile Include="..\..\Core\MarkerOwnershipRules.cs" Link="Core\MarkerOwnershipRules.cs" />
+    <Compile Include="..\..\Core\LedgerExtras.cs" Link="Core\LedgerExtras.cs" />
+    <Compile Include="..\..\Core\MarkerReconcile.cs" Link="Core\MarkerReconcile.cs" />
+    <Compile Include="..\..\Core\RefreshFingerprint.cs" Link="Core\RefreshFingerprint.cs" />
+    <Compile Include="..\..\Core\MarkerUndo.cs" Link="Core\MarkerUndo.cs" />
+    <Compile Include="..\..\Core\LevelTable.cs" Link="Core\LevelTable.cs" />
+    <Compile Include="..\..\Core\MarkerPlan.cs" Link="Core\MarkerPlan.cs" />
+    <Compile Include="..\..\Core\MarkerPlan.Planner.cs" Link="Core\MarkerPlan.Planner.cs" />
+    <Compile Include="..\..\Core\MarkerPlanAssembler.cs" Link="Core\MarkerPlanAssembler.cs" />
+    <!-- Clash schedule UI (slice B): the Task-based action interface and plain data, the menu model and the row text. Pure. -->
   </ItemGroup>
 
 </Project>

@@ -18,6 +18,7 @@ namespace LiveClash.Testing
             StaleInstanceIsNotBack(check);
             IdleOrder(check);
             ResetSites(check);
+            HandlerResets(check);   // delta review 3, DR3-M2: the schedule reset is in no event handler
             TimeBoxedSlice(check);
             TrackerNamesADeletedLinkAsRemoved(check);   // item 9 probe P9-2
             BacklogModel(check);   // delta review L-3

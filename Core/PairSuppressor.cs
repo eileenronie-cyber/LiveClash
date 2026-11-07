@@ -151,6 +151,20 @@ namespace LiveClash.Core
             // the OwnerViewId test below, but this covers them without depending on it.
             if (e is Group) return true;
 
+            // One of LiveClash's own clash markers (a DirectShape it made) is never a model element to check: not a source,
+            // not a target, not audit noise (spec 6.8). Markers are Specialty Equipment, which no set can pick today, so this is the
+            // second guard; this method is the one choke point the full check, the live path, the catalogue, the link scope
+            // and the audit all pass an element through.
+            {
+                var shape = e as DirectShape;
+                if (shape != null)
+                {
+                    string app = null;
+                    try { app = shape.ApplicationId; } catch { }
+                    if (MarkerIdentity.IsOurs(app)) return true;
+                }
+            }
+
             // The drawn centre line of a pipe or duct is not the pipe. See
             // CentreLineCategories -- no solids, and Revit refuses them for
             // intersection filtering, so they can only ever produce Unverified noise.

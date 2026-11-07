@@ -66,6 +66,7 @@ namespace LiveClash
                 // other — recording on only one would miss half the ways work lands.
                 application.ControlledApplication.DocumentSaved += OnDocumentSaved;
                 application.ControlledApplication.DocumentSynchronizedWithCentral += OnDocumentSynced;
+                application.ControlledApplication.DocumentReloadedLatest += OnDocumentReloadedLatest;   // another user's work arrived: the clash schedule reads the model again
 
                 // Save As raises NEITHER of the two above — measured directly, not
                 // assumed: a real File > Save As fired DocumentSavedAs alone, so the
@@ -107,6 +108,7 @@ namespace LiveClash
                 application.ViewActivated -= OnViewActivated;
                 application.ControlledApplication.DocumentSaved -= OnDocumentSaved;
                 application.ControlledApplication.DocumentSynchronizedWithCentral -= OnDocumentSynced;
+                application.ControlledApplication.DocumentReloadedLatest -= OnDocumentReloadedLatest;
                 application.ControlledApplication.DocumentSavedAs -= OnDocumentSavedAs;
                 application.ControlledApplication.DocumentSavingAs -= OnDocumentSavingAs;
                 LiveClash.UI.ThemeManager.UnhookRevit();
@@ -835,6 +837,73 @@ namespace LiveClash
         }
 
         /// <summary>
+        /// The session's document changed (opened, activated, switched to): the clash schedule's snapshot is read again for it, at the same moment the other
+        /// per-model state is. Without it the panel kept the snapshot it read at start-up, before any model was open, and sent triage on marked rows down the
+        /// ledger-only path (independent review 2026-11-01, H1). Queued as a job, so no Revit call happens here; read-only; the kill switch keeps it off.
+        /// </summary>
+        internal static void NotifyScheduleSessionChanged(Document doc)
+        {
+            try
+            {
+                var panel = UI.ClashPaneProvider.Panel;
+                var actions = panel.ScheduleActions as UI.ClashScheduleActions;
+                if (!MarkerSwitch.IsOn)
+                {
+                    // Switched off on this PC: the panel works as before (spec 12.2), so the schedule comes off it instead of leaving it waiting for a read
+                    // that will never come (delta review D-L3).
+                    if (actions != null) { actions.Reset(); panel.ScheduleActions = null; }
+                    return;
+                }
+                if (actions == null) { UI.ClashPaneProvider.AttachSchedule(panel); return; }   // switched on again: attached and read
+                // Not ready from this moment, until the rebuild for the new document has run: the panel refuses every triage while the snapshot is not
+                // ready, so none can go to the old model's rows in between (review H1, second half). A failed rebuild leaves it so, with its reason.
+                actions.Reset();
+                actions.Reload();
+            }
+            catch (Exception ex) { Log.Warn("The clash schedule could not follow the document change", ex); }
+        }
+
+        /// <summary>
+        /// Another user's work arrived (Reload Latest) or this user synchronized: the clash schedule's snapshot is read again, so the rows show the
+        /// new assignee, who holds what, and the pending decisions the model has now taken (independent review 2026-11-01, H1, second half).
+        /// </summary>
+        internal static void NotifyScheduleModelRefreshed(Document doc)
+        {
+            try
+            {
+                if (doc == null || !IsSessionDocument(doc) || !MarkerSwitch.IsOn) return;   // a background model's news is not this panel's
+                var actions = UI.ClashPaneProvider.Panel.ScheduleActions as UI.ClashScheduleActions;
+                if (actions != null) actions.Reload();
+            }
+            catch (Exception ex) { Log.Warn("The clash schedule could not follow the model refresh", ex); }
+        }
+
+        /// <summary>An Undo or Redo of a LiveClash marker transaction (delta review D-M2): the markers are not as the snapshot says.</summary>
+        internal static void NotifyScheduleUndoRedo(Document doc)
+        {
+            try
+            {
+                if (doc == null || !IsSessionDocument(doc)) return;
+                var actions = UI.ClashPaneProvider.Panel.ScheduleActions as UI.ClashScheduleActions;
+                if (actions == null) return;
+                actions.Reset();   // the markers are not as the snapshot says: not ready until it is read again
+                if (MarkerSwitch.IsOn) actions.Reload();
+            }
+            catch (Exception ex) { Log.Warn("The clash schedule could not follow the undo or redo", ex); }
+        }
+
+        /// <summary>The session's document closed: the snapshot is emptied, so a closed model's rows are never taken for the next one's.</summary>
+        internal static void NotifyScheduleSessionClosed()
+        {
+            try
+            {
+                var actions = UI.ClashPaneProvider.Panel.ScheduleActions as UI.ClashScheduleActions;
+                if (actions != null) actions.Reset();
+            }
+            catch (Exception ex) { Log.Warn("The clash schedule could not follow the document closing", ex); }
+        }
+
+        /// <summary>
         /// Is <paramref name="doc"/> the session's own document, the one the store and the ledgers belong
         /// to? The rule is <see cref="SessionGuard.ShouldActOn"/>; this only reads its facts. Never throws:
         /// a document it cannot read is not acted on.
@@ -904,7 +973,7 @@ namespace LiveClash
             try
             {
                 HandleDocumentChanged(e.GetDocument(), e.GetAddedElementIds(), e.GetModifiedElementIds(),
-                    e.GetDeletedElementIds(), e.Operation);
+                    e.GetDeletedElementIds(), e.Operation, e.GetTransactionNames());
             }
             catch (Exception ex)
             {
@@ -919,7 +988,7 @@ namespace LiveClash
         /// </summary>
         internal static void HandleDocumentChanged(Document doc, ICollection<ElementId> addedIds,
             ICollection<ElementId> modifiedIds, ICollection<ElementId> deletedIds,
-            Autodesk.Revit.DB.Events.UndoOperation operation)
+            Autodesk.Revit.DB.Events.UndoOperation operation, IEnumerable<string> transactionNames = null)
         {
             try
             {
@@ -935,6 +1004,10 @@ namespace LiveClash
                         ClashUpdater.NoteCommittedDeletions(doc, deletedIds);
                 }
                 catch (Exception ex) { Log.Warn("Could not remember a committed deletion", ex); }
+
+                if ((operation == Autodesk.Revit.DB.Events.UndoOperation.TransactionUndone || operation == Autodesk.Revit.DB.Events.UndoOperation.TransactionRedone)
+                    && MarkerUndo.Concerns(transactionNames))
+                    NotifyScheduleUndoRedo(doc);
 
                 var touched = new List<ElementId>();
                 touched.AddRange(modifiedIds);
@@ -1086,6 +1159,14 @@ namespace LiveClash
             object sender, Autodesk.Revit.DB.Events.DocumentSynchronizedWithCentralEventArgs e)
         {
             FlushIfActive(sender, e == null ? null : e.Document);
+            try { NotifyScheduleModelRefreshed(e == null ? null : e.Document); }   // the pending triages were taken and the held markers released
+            catch (Exception ex) { Log.Warn("Synchronize handling for the clash schedule failed", ex); }
+        }
+
+        private void OnDocumentReloadedLatest(object sender, Autodesk.Revit.DB.Events.DocumentReloadedLatestEventArgs e)
+        {
+            try { NotifyScheduleModelRefreshed(e == null ? null : e.Document); }
+            catch (Exception ex) { Log.Warn("Reload Latest handling for the clash schedule failed", ex); }
         }
 
         /// <summary>
@@ -1393,6 +1474,7 @@ namespace LiveClash
             ClashSettings.LoadFor(doc);
             ClashStatusStore.Instance.LoadFor(doc);
             ResolvedLog.LoadFor(doc);
+            NotifyScheduleSessionChanged(doc);   // the marker snapshot follows the document; after the ledger, which it overlays
 
             // THE TRIGGERS BELONG TO THE OLD MODEL'S FILTER. They are built from the
             // source category list at registration, and until now that only ever
@@ -1685,6 +1767,7 @@ namespace LiveClash
             ClashEngine.InvalidateAll();
             _adoptedDocKey = null;
             _adoptedDocRef = null;
+            NotifyScheduleSessionClosed();   // the schedule's snapshot follows the close, and only a close that really happened
         }
 
         private void OnDocumentClosed(object sender, Autodesk.Revit.DB.Events.DocumentClosedEventArgs e)

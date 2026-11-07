@@ -363,6 +363,39 @@ namespace LiveClash.Core
             LedgerFile.Append(path, Header(), text.ToString());
         }
 
+        /// <summary>
+        /// The lines of the current ledger file, for the readers of the model events (<see cref="LedgerExtras.Read"/>) and the decision replay;
+        /// null when there is no file for this model or it cannot be read.
+        /// </summary>
+        internal List<string> ReadLines()
+        {
+            var path = CurrentFile;
+            if (path == null) return null;
+            LedgerFile.ReadState state;
+            var lines = LedgerFile.Read(path, out state);
+            return lines == null ? null : new List<string>(lines);
+        }
+
+        /// <summary>
+        /// Appends already-formatted event lines (the clash schedule's model events, and the decision lines copied from the markers) through the
+        /// same write as every other event, and folds them into the decisions held in memory as a reload would, so the panel shows them at
+        /// once. Nothing happens for an empty list.
+        /// </summary>
+        internal void AppendLines(IEnumerable<string> lines)
+        {
+            if (lines == null) return;
+            var list = new List<string>();
+            foreach (var l in lines) if (!string.IsNullOrEmpty(l)) list.Add(l);
+            if (list.Count == 0) return;
+            Append(list);
+            lock (_gate)
+            {
+                int events, legacy, repaired;
+                ClashStatusReplay.Replay(list, _byKey, out events, out legacy, out repaired);
+            }
+            Raise();
+        }
+
         private string Header()
         {
             lock (_gate)

@@ -30,6 +30,7 @@
           <ColumnDefinition Width="*"/>
           <ColumnDefinition Width="Auto"/>
           <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
         <CheckBox x:Name="LiveCheck" Grid.Column="0" Content="Live" VerticalAlignment="Center" Margin="0,0,12,0"
                   FontWeight="SemiBold"
@@ -48,6 +49,9 @@
         <CheckBox x:Name="GroupCheck" Grid.Column="3" Content="Group" VerticalAlignment="Center" Margin="12,0,0,0"
                   Checked="GroupCheck_Changed" Unchecked="GroupCheck_Changed"
                   ToolTip="Collapse nearby clashes into one row per coordination issue"/>
+        <CheckBox x:Name="ByOthersCheck" Grid.Column="4" Content="By others" VerticalAlignment="Center" Margin="12,0,0,0" Visibility="Collapsed"
+                  Checked="ByOthers_Changed" Unchecked="ByOthers_Changed"
+                  ToolTip="Only the clashes someone else decided, Ignored and Coordinated ones included"/>
       </Grid>
     </Border>
 
@@ -78,6 +82,15 @@
         <Button x:Name="ExportButton" Style="{StaticResource LcButton}" Content="Export…"
                 Margin="0,2,5,2" Click="ExportButton_Click"
                 ToolTip="Write the register to a CSV the coordination meeting can open"/>
+        <Button x:Name="ScheduleButton" Style="{StaticResource LcButton}" Content="Clash schedule" Visibility="Collapsed"
+                Margin="0,2,5,2" Click="ScheduleButton_Click">
+          <Button.ContextMenu>
+            <ContextMenu x:Name="ScheduleMenu"/>
+          </Button.ContextMenu>
+        </Button>
+        <Button x:Name="AssignButton" Style="{StaticResource LcButton}" Content="Assign&#8230;" Visibility="Collapsed" IsEnabled="False"
+                Margin="0,2,5,2" Click="Assign_Click"
+                ToolTip="Give the selected clashes to a Revit user"/>
       </WrapPanel>
     </Border>
 
@@ -171,6 +184,8 @@
           <MenuItem Header="Mark _Ignored (false positive)" Click="MarkIgnored_Click"/>
           <Separator/>
           <MenuItem Header="Add or edit _note…" Click="Note_Click"/>
+          <MenuItem x:Name="AssignMenuItem" Header="_Assign to…" Click="Assign_Click" Visibility="Collapsed"/>
+          <MenuItem x:Name="DiscardPendingMenuItem" Header="_Discard pending" Click="DiscardPending_Click" Visibility="Collapsed"/>
           <Separator/>
           <MenuItem Header="Clear status (back to New)" Click="MarkNew_Click"/>
         </ContextMenu>
@@ -263,6 +278,16 @@
           </GridViewColumn>
           <GridViewColumn Header="" Width="34" DisplayMemberBinding="{Binding CountText}"/>
 
+          <!-- Clash schedule columns: no width until the model has markers (ClashPanel.Schedule.cs). -->
+          <GridViewColumn x:Name="IssueColumn" Header="Issue" Width="0">
+            <GridViewColumn.CellTemplate>
+              <DataTemplate>
+                <TextBlock Text="{Binding IssueNoText}" Margin="2,0" TextTrimming="CharacterEllipsis"
+                           ToolTip="{Binding IssueNoText}" ui:TruncationTip.OnlyWhenCut="True"/>
+              </DataTemplate>
+            </GridViewColumn.CellTemplate>
+          </GridViewColumn>
+
           <GridViewColumn Header="Element" Width="180">
             <GridViewColumn.CellTemplate>
               <DataTemplate>
@@ -310,7 +335,8 @@
             <GridViewColumn.CellTemplate>
               <DataTemplate>
                 <TextBlock Text="{Binding StatusText}" Foreground="{Binding StatusBrush}"
-                           FontWeight="SemiBold" TextDecorations="{Binding Decorations}"/>
+                           FontWeight="SemiBold" TextDecorations="{Binding Decorations}"
+                           TextTrimming="CharacterEllipsis" ToolTip="{Binding StatusTip}"/>
               </DataTemplate>
             </GridViewColumn.CellTemplate>
           </GridViewColumn>
@@ -319,6 +345,30 @@
               <DataTemplate>
                 <TextBlock Text="{Binding NoteText}" Margin="2,0" TextTrimming="CharacterEllipsis"
                            ToolTip="{Binding NoteText}" ui:TruncationTip.OnlyWhenCut="True"/>
+              </DataTemplate>
+            </GridViewColumn.CellTemplate>
+          </GridViewColumn>
+          <GridViewColumn x:Name="AssignedColumn" Header="Assigned" Width="0">
+            <GridViewColumn.CellTemplate>
+              <DataTemplate>
+                <TextBlock Text="{Binding AssignedText}" Margin="2,0" TextTrimming="CharacterEllipsis"
+                           ToolTip="{Binding AssignedText}" ui:TruncationTip.OnlyWhenCut="True"/>
+              </DataTemplate>
+            </GridViewColumn.CellTemplate>
+          </GridViewColumn>
+          <GridViewColumn x:Name="HeldByColumn" Header="Held by" Width="0">
+            <GridViewColumn.CellTemplate>
+              <DataTemplate>
+                <TextBlock Text="{Binding HeldByText}" Margin="2,0" TextTrimming="CharacterEllipsis"
+                           ToolTip="{Binding HeldByText}" ui:TruncationTip.OnlyWhenCut="True"/>
+              </DataTemplate>
+            </GridViewColumn.CellTemplate>
+          </GridViewColumn>
+          <GridViewColumn x:Name="ScheduleGroupColumn" Header="Group" Width="0">
+            <GridViewColumn.CellTemplate>
+              <DataTemplate>
+                <TextBlock Text="{Binding ScheduleGroupText}" Margin="2,0" TextTrimming="CharacterEllipsis"
+                           ToolTip="{Binding ScheduleGroupText}" ui:TruncationTip.OnlyWhenCut="True"/>
               </DataTemplate>
             </GridViewColumn.CellTemplate>
           </GridViewColumn>

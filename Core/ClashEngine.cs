@@ -373,22 +373,7 @@ namespace LiveClash.Core
         internal static void AddDeduped(
             List<ClashResult> all, Dictionary<string, int> index, ClashResult r, string setName)
         {
-            if (string.IsNullOrEmpty(r.Key)) { r.SetName = setName; all.Add(r); return; }
-
-            int at;
-            if (!index.TryGetValue(r.Key, out at))
-            {
-                r.SetName = setName;
-                index[r.Key] = all.Count;
-                all.Add(r);
-                return;
-            }
-
-            if (r.Severity == ClashSeverity.Hard && all[at].Severity != ClashSeverity.Hard)
-            {
-                r.SetName = setName;
-                all[at] = r;
-            }
+            ClashDedupe.Add(all, index, r, setName);
         }
 
         /// <summary>

@@ -1,7 +1,6 @@
 using System;
 using System.Diagnostics;
 using System.Threading;
-using System.Windows.Interop;
 using System.Windows.Threading;
 using LiveClash.Core;
 
@@ -32,6 +31,20 @@ namespace LiveClash.UI
         // anything, so a window that was slow to start cannot appear after the check it belonged to is over.
         private volatile bool _abandoned;
         private int _closeSent;
+
+        // Where a start spent its time, so a window that did not appear can say which step it was stuck in (-1 = not reached).
+        private readonly Stopwatch _startClock = Stopwatch.StartNew();
+        private long _tBegan = -1, _tBuilt = -1, _tShown = -1;
+
+        private string Phases(IntPtr owner)
+        {
+            Func<long, string, string, string> at = (t, did, didNot) => t >= 0 ? did + " after " + t + " ms" : didNot;
+            return at(_tBegan, "thread began", "thread did not begin") + ", " + at(_tBuilt, "window built", "window not built") + ", "
+                + at(_tShown, "window shown", "window not shown") + ", owner 0x" + owner.ToInt64().ToString("X", System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>True when the window is up (the start succeeded); false for an inert one.</summary>
+        internal bool IsAlive { get { return !_dead && _dispatcher != null; } }
 
         // A clock that cannot wrap. This was Environment.TickCount, a 32-bit int: negative for the second half of
         // every 49.7-day uptime, where `now - last < 120` was true for every report and the window sat at 0%.
@@ -68,7 +81,10 @@ namespace LiveClash.UI
             return estimatedSeconds >= WorthShowingSeconds;
         }
 
-        /// <summary>Start the window. Never throws; on any failure the result simply does nothing.</summary>
+        /// <summary>
+        /// Start the window. Never throws; on any failure the result simply does nothing. <paramref name="owner"/> (Revit's main window) is NOT used as the
+        /// window's owner any more (R52): it is only named in the log when the window did not appear.
+        /// </summary>
         internal static FullCheckProgress Start(IntPtr owner)
         {
             var p = new FullCheckProgress();
@@ -79,6 +95,7 @@ namespace LiveClash.UI
                 {
                     try
                     {
+                        p._tBegan = p._startClock.ElapsedMilliseconds;
                         if (p._abandoned) return;          // Close was called before this thread began
                         p._dispatcher = Dispatcher.CurrentDispatcher;
                         // An exception raised on THIS thread must not be able to take Revit's process down.
@@ -88,9 +105,16 @@ namespace LiveClash.UI
                             e.Handled = true;
                         };
                         p._window = new FullCheckProgressWindow();
-                        if (owner != IntPtr.Zero) new WindowInteropHelper(p._window).Owner = owner;
+                        // NO OWNER (R52, 2026-11-02). Showing a window whose Owner lives on ANOTHER thread needs that thread to dispatch sent messages, and Revit's thread
+                        // is blocked for the whole sweep: on two big models Show() never returned ("window built, window not shown"), Start gave up after 5 s, and a
+                        // window that did show could freeze when it was activated or moved. Topmost instead of owned, so Revit's blocked frame cannot cover it. It has
+                        // no taskbar button (ShowInTaskbar is False in the XAML) and ends with the window: Close (or an abandoned start) always closes it.
+                        // The owner handle is kept only for the log line of a start that did not come up.
+                        p._window.Topmost = true;
+                        p._tBuilt = p._startClock.ElapsedMilliseconds;
                         if (p._abandoned) return;          // Close was called while the window was being built: never show it
                         p._window.Show();
+                        p._tShown = p._startClock.ElapsedMilliseconds;
                         ready.Set();
                         Dispatcher.Run();
                     }
@@ -106,7 +130,12 @@ namespace LiveClash.UI
                 p._thread.Name = "LiveClash progress window";
                 p._thread.Start();
 
-                if (!ready.Wait(ReadyTimeoutMs) || p._dead || p._window == null) p._dead = true;
+                if (!ready.Wait(ReadyTimeoutMs) || p._dead || p._window == null)
+                {
+                    p._dead = true;
+                    // This used to be silent: the caller waited the whole timeout and nothing said why (clash schedule at scale, 2026-11-02).
+                    Log.Warn("Progress window did not appear within " + ReadyTimeoutMs + " ms (" + p.Phases(owner) + "); the work goes on without it.");
+                }
             }
             catch (Exception ex)
             {
@@ -139,6 +168,18 @@ namespace LiveClash.UI
                 _dispatcher.BeginInvoke(new Action(() => w.Update(done, total, elapsedMs, remainingMs)));
             }
             catch (Exception ex) { Log.Warn("Progress window: could not post an update", ex); }
+        }
+
+        /// <summary>Say which job this window is for (title bar, heading, the line while work goes on, what it counts). Never throws.</summary>
+        internal void SetKind(string windowTitle, string heading, string work, string unit)
+        {
+            if (_dead || _dispatcher == null) return;
+            try
+            {
+                var w = _window;
+                _dispatcher.BeginInvoke(new Action(() => w.SetKind(windowTitle, heading, work, unit)));
+            }
+            catch (Exception ex) { Log.Warn("Progress window: could not post its kind", ex); }
         }
 
         /// <summary>Change the line under the title (a phase that has no percentage).</summary>

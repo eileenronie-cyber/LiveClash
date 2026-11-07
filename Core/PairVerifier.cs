@@ -108,7 +108,7 @@ namespace LiveClash.Core
         // ------------------------------------------------------------------ host
 
         private static Verdict VerifyHost(
-            Document doc, Element host, ClashResult r, ClashSettings s, out ClashSeverity severity)
+            Document doc, Element host, ClashResult r, ClashSettings s, out ClashSeverity severity, Rule rule = null)
         {
             severity = r.Severity;
 
@@ -116,7 +116,8 @@ namespace LiveClash.Core
             try { other = doc.GetElement(r.OtherElementId); } catch { return Verdict.Unknown; }
             if (other == null || !other.IsValidObject) return Verdict.Resolved;
 
-            double clearance = MaxClearanceForPair(s, host, other);
+            // A rule given by the caller (a marker's own) replaces the settings' for this pair: s is then null and never read.
+            double clearance = rule != null ? rule.ClearanceFeet : MaxClearanceForPair(s, host, other);
 
             // Both helpers below take severity as their own `out`, which they must
             // assign on every path — including Unknown, where there is nothing real to
@@ -144,7 +145,7 @@ namespace LiveClash.Core
                 // it costs GetInsulationIds plus a solid intersection per insulation piece, on
                 // every idle pass, for every soft row in an insulation-aware set.
                 if (bareSeverity != ClashSeverity.Hard && r.Severity == ClashSeverity.Hard
-                    && AnySetWantsInsulation(s, host, other))
+                    && (rule != null ? rule.Insulated : AnySetWantsInsulation(s, host, other)))
                 {
                     ClashSeverity harder;
                     if (VerifyHostInsulation(doc, host, other, clearance, out harder, seekHard: true)
@@ -167,7 +168,7 @@ namespace LiveClash.Core
             // element's category — an insulation category is never in any set's scope
             // on either side, so that call would silently fall back to the model
             // default and ignore the set's real override.
-            if (!AnySetWantsInsulation(s, host, other)) return Verdict.Resolved;
+            if (!(rule != null ? rule.Insulated : AnySetWantsInsulation(s, host, other))) return Verdict.Resolved;
 
             // Both sources, as in VerifyLink: the host element's own insulation, and the insulation of the
             // OTHER element (which the engine tests when that element is only a target). Leaving the second out
@@ -294,7 +295,7 @@ namespace LiveClash.Core
 
         private static Verdict VerifyLink(
             Document doc, Element host, ClashResult r, ClashSettings s,
-            Dictionary<long, LinkContext> links, out ClashSeverity severity)
+            Dictionary<long, LinkContext> links, out ClashSeverity severity, Rule rule = null)
         {
             severity = r.Severity;
 
@@ -309,7 +310,7 @@ namespace LiveClash.Core
             try { other = link.Document.GetElement(r.OtherElementId); } catch { return Verdict.Unknown; }
             if (other == null || !other.IsValidObject) return Verdict.Resolved;
 
-            double clearance = MaxClearanceForPair(s, host, other, link.Name);
+            double clearance = rule != null ? rule.ClearanceFeet : MaxClearanceForPair(s, host, other, link.Name);
 
             // See the note in VerifyHost on why the callee's answer goes through a
             // local first: it must assign severity on every path, including Unknown,
@@ -323,7 +324,7 @@ namespace LiveClash.Core
 
                 // Same as VerifyHost: a bare Clearance may hide insulation that Hard-clashes.
                 if (bareSeverity != ClashSeverity.Hard && r.Severity == ClashSeverity.Hard
-                    && AnySetWantsInsulation(s, host, other, link.Name))
+                    && (rule != null ? rule.Insulated : AnySetWantsInsulation(s, host, other, link.Name)))
                 {
                     ClashSeverity harder;
                     if (VerifyLinkInsulation(doc, host, other, link, clearance, out harder, seekHard: true)
@@ -340,7 +341,7 @@ namespace LiveClash.Core
             // The bare host is provably clear in link space too. Same reasoning as
             // VerifyHost's own note: an insulation-aware set's scope may still cover
             // this pair, and its insulation is what a full check would actually find.
-            if (!AnySetWantsInsulation(s, host, other, link.Name)) return Verdict.Resolved;
+            if (!(rule != null ? rule.Insulated : AnySetWantsInsulation(s, host, other, link.Name))) return Verdict.Resolved;
 
             // Both directions, because the engine finds a pair in both: the host element's own
             // insulation, and the insulation of the linked element. Leaving out the second is

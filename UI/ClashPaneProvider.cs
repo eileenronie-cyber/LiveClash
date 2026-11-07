@@ -27,8 +27,39 @@ namespace LiveClash.UI
         {
             get
             {
-                if (_panel == null) { _panel = new ClashPanel(); _panel.ListenForLife(); }
+                if (_panel == null)
+                {
+                    _panel = new ClashPanel();
+                    _panel.ListenForLife();    // the pane's panel listens for the session first (round 8, M-1)
+                    AttachSchedule(_panel);    // then the clash schedule is attached and starts its first read
+                }
                 return _panel;
+            }
+        }
+
+        /// <summary>
+        /// Gives the panel the Revit side of the clash schedule (spec 9). A failure here must never keep the panel from opening, so it is logged
+        /// and the panel stays as it was (the feature stays dark); the per-PC kill switch (spec 12.2) keeps it off. True when it was attached.
+        /// </summary>
+        internal static bool AttachSchedule(ClashPanel panel)
+        {
+            try
+            {
+                bool off = !LiveClash.Core.MarkerSwitch.IsOn;
+                if (off)
+                {
+                    LiveClash.Core.Log.Info("Clash markers are switched off on this PC; the clash schedule is not attached to the panel.");
+                    return false;
+                }
+                var actions = new ClashScheduleActions(panel);
+                panel.ScheduleActions = actions;
+                actions.Reload();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LiveClash.Core.Log.Warn("The clash schedule could not be attached to the panel", ex);
+                return false;
             }
         }
 

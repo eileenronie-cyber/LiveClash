@@ -106,9 +106,11 @@ else {
         $text = [regex]::Replace($text, '\sxmlns:ui="[^"]*"', '')
         $text = [regex]::Replace($text, '\sui:[\w\.]+="[^"]*"', '')
         $text = $text.Replace('/LiveClash;component/UI/Theme.xaml', $themeUri)
-        $code = [IO.Path]::ChangeExtension($f.FullName, '.xaml.cs')
-        if (Test-Path $code) {
-            $handlers = [regex]::Matches([IO.File]::ReadAllText($code), '\bvoid\s+(\w+)\s*\(\s*(?:object|System\.Object)\s+\w+\s*,') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+        # The code-behind, and any partial of it beside it (ClashPanel.Schedule.cs holds handlers of ClashPanel.xaml).
+        $codeText = ''
+        foreach ($cs in Get-ChildItem -Path $f.DirectoryName -Filter ([IO.Path]::GetFileNameWithoutExtension($f.Name) + '*.cs')) { $codeText += [IO.File]::ReadAllText($cs.FullName) + "`n" }
+        if ($codeText.Length -gt 0) {
+            $handlers = [regex]::Matches($codeText, '\bvoid\s+(\w+)\s*\(\s*(?:object|System\.Object)\s+\w+\s*,') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
             foreach ($h in $handlers) { $text = [regex]::Replace($text, '\s[\w:\.]+="' + [regex]::Escape($h) + '"', '') }
         }
 

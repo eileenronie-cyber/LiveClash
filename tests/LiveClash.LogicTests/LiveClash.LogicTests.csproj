@@ -16,7 +16,9 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <!-- The headless suite also runs on .NET Framework 4.8, the runtime of Revit 2024 (ci\gate.ps1, not -Quick): -p:LcNet48=true -->
+    <TargetFramework Condition="'$(LcNet48)' != 'true'">net8.0-windows</TargetFramework>
+    <TargetFramework Condition="'$(LcNet48)' == 'true'">net48</TargetFramework>
     <LangVersion>latest</LangVersion>
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>disable</Nullable>
@@ -71,6 +73,46 @@
     <Compile Include="..\..\Testing\LedgerReviewR8FilesChecks.cs" Link="Shared\LedgerReviewR8FilesChecks.cs" />
     <Compile Include="..\..\Testing\UiOutcomeChecks.cs" Link="Shared\UiOutcomeChecks.cs" />
     <Compile Include="..\..\Testing\ReviewChecks.SessionHandlers.Logic.cs" Link="Shared\ReviewChecks.SessionHandlers.Logic.cs" />
+    <Compile Include="..\..\Testing\MarkerIdentityChecks.cs" Link="Shared\MarkerIdentityChecks.cs" />
+    <Compile Include="..\..\Testing\MarkerRecordChecks.cs" Link="Shared\MarkerRecordChecks.cs" />
+    <Compile Include="..\..\Testing\MarkerTextChecks.cs" Link="Shared\MarkerTextChecks.cs" />
+    <Compile Include="..\..\Testing\ScheduleMenuChecks.cs" Link="Shared\ScheduleMenuChecks.cs" />
+    <Compile Include="..\..\Testing\ScheduleRowChecks.cs" Link="Shared\ScheduleRowChecks.cs" />
+    <Compile Include="..\..\Testing\SchedulePlanChecks.cs" Link="Shared\SchedulePlanChecks.cs" />
+    <Compile Include="..\..\Testing\ScheduleConfirmChecks.cs" Link="Shared\ScheduleConfirmChecks.cs" />
+    <Compile Include="..\..\Testing\ScheduleAssignChecks.cs" Link="Shared\ScheduleAssignChecks.cs" />
+    <Compile Include="..\..\Testing\SyncContextChecks.cs" Link="Shared\SyncContextChecks.cs" />
+    <Compile Include="..\..\Testing\LevelTableChecks.cs" Link="Shared\LevelTableChecks.cs" />
+    <Compile Include="..\..\Testing\ScheduleFlowChecks.cs" Link="Shared\ScheduleFlowChecks.cs" />
+    <Compile Include="..\..\Testing\SchedulePlanFactoryChecks.cs" Link="Shared\SchedulePlanFactoryChecks.cs" />
+    <Compile Include="..\..\Testing\ScheduleReviewChecks.cs" Link="Shared\ScheduleReviewChecks.cs" />
+    <Compile Include="..\..\Testing\MarkerRevitLogicChecks.cs" Link="Shared\MarkerRevitLogicChecks.cs" />
+    <Compile Include="..\..\Testing\MarkerPlanChecks.cs" Link="Shared\MarkerPlanChecks.cs" />
+    <Compile Include="..\..\Testing\MarkerCoverChecks.cs" Link="Shared\MarkerCoverChecks.cs" />
+    <Compile Include="..\..\Testing\MarkerLedgerChecks.cs" Link="Shared\MarkerLedgerChecks.cs" />
+    <Compile Include="..\..\Testing\ShippedLedgerReader.cs" Link="Shared\ShippedLedgerReader.cs" />
+    <Compile Include="..\..\Testing\MarkerDedupeChecks.cs" Link="Shared\MarkerDedupeChecks.cs" />
+    <Compile Include="..\..\Testing\MarkerRowChecks.cs" Link="Shared\MarkerRowChecks.cs" />
+    <Compile Include="..\..\Testing\MarkerPendingMapChecks.cs" Link="Shared\MarkerPendingMapChecks.cs" />
+    <Compile Include="..\..\Testing\MarkerAssemblerChecks.cs" Link="Shared\MarkerAssemblerChecks.cs" />
+    <Compile Include="..\..\Testing\MarkerReviewAChecks.cs" Link="Shared\MarkerReviewAChecks.cs" />
+    <Compile Include="..\..\Testing\MarkerDeltaL4Checks.cs" Link="Shared\MarkerDeltaL4Checks.cs" />
+    <Compile Include="..\..\Testing\MarkerMutationPlanChecks.cs" Link="Shared\MarkerMutationPlanChecks.cs" />
+    <Compile Include="..\..\Testing\MarkerMutationPlan2Checks.cs" Link="Shared\MarkerMutationPlan2Checks.cs" />
+    <Compile Include="..\..\Testing\MarkerMutationPlan3Checks.cs" Link="Shared\MarkerMutationPlan3Checks.cs" />
+    <Compile Include="..\..\Testing\MarkerMutationLedgerChecks.cs" Link="Shared\MarkerMutationLedgerChecks.cs" />
+    <Compile Include="..\..\Testing\MarkerMutationPlan4Checks.cs" Link="Shared\MarkerMutationPlan4Checks.cs" />
+    <Compile Include="..\..\Testing\MarkerMutationIdChecks.cs" Link="Shared\MarkerMutationIdChecks.cs" />
+    <Compile Include="..\..\Testing\MarkerMutationModelChecks.cs" Link="Shared\MarkerMutationModelChecks.cs" />
+    <Compile Include="..\..\Testing\MarkerMutationFlowChecks.cs" Link="Shared\MarkerMutationFlowChecks.cs" />
+    <Compile Include="..\..\Testing\MarkerMutationFinishChecks.cs" Link="Shared\MarkerMutationFinishChecks.cs" />
+    <Compile Include="..\..\Testing\MarkerMutationOrderChecks.cs" Link="Shared\MarkerMutationOrderChecks.cs" />
+    <Compile Include="..\..\Testing\MarkerMutationReviewChecks.cs" Link="Shared\MarkerMutationReviewChecks.cs" />
+    <Compile Include="..\..\Testing\MarkerDr3Checks.cs" Link="Shared\MarkerDr3Checks.cs" />
+    <Compile Include="..\..\Testing\RunHeadline.cs" Link="Shared\RunHeadline.cs" />
+    <Compile Include="..\..\Testing\MarkerMutationRowChecks.cs" Link="Shared\MarkerMutationRowChecks.cs" />
+    <Compile Include="..\..\Testing\MarkerMutationSmallChecks.cs" Link="Shared\MarkerMutationSmallChecks.cs" />
+    <Compile Include="..\..\Testing\MarkerMutationAssemblerChecks.cs" Link="Shared\MarkerMutationAssemblerChecks.cs" />
     <Compile Include="..\..\Testing\OpenGroupLedger.cs" Link="Shared\OpenGroupLedger.cs" />
     <Compile Include="..\..\Testing\ReviewChecks.GroupLedger.cs" Link="Shared\ReviewChecks.GroupLedger.cs" />
     <Compile Include="..\..\Testing\R8LiveChecks.cs" Link="Shared\R8LiveChecks.cs" />

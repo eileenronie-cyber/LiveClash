@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
@@ -324,6 +325,7 @@ namespace LiveClash.UI
             yield return row.NoteText;
             yield return row.StatusText;
             yield return row.KindText;
+            yield return row.ScheduleSearchText;   // issue numbers (merged ones too) and the assignee
             if (group == null) yield break;
             foreach (var m in group.Members)
             {
@@ -704,7 +706,9 @@ namespace LiveClash.UI
 
                 _rows.Clear();
 
-                bool showAll = ShowAllCheck.IsChecked == true;
+                // "By others" brings the clashes a colleague decided back into view, Ignored and Coordinated ones included.
+                bool byOthers = ScheduleActions != null && ByOthersCheck.IsChecked == true;
+                bool showAll = ShowAllCheck.IsChecked == true || byOthers;
                 int hidden = 0;
 
                 // The search is read HERE, on every rebuild. This list is rebuilt on every live edit and every
@@ -737,6 +741,12 @@ namespace LiveClash.UI
                     if (searching && !ClashSearch.Matches(query, SearchFields(head, g)))
                     {
                         notMatching++;
+                        continue;
+                    }
+
+                    if (byOthers && !head.DecidedByOthers)
+                    {
+                        hidden++;
                         continue;
                     }
 
@@ -819,6 +829,9 @@ namespace LiveClash.UI
                 if (notMatching > 0) summary.Add(notMatching + " not matching");
                 if (notNew > 0) summary.Add(notNew + " not new");
                 GroupText.Text = string.Join(", ", summary.ToArray());
+                // "N hidden" is every row you cannot see right now for a decision reason; say which, so By others is not a surprise.
+                GroupText.ToolTip = hidden == 0 ? null
+                    : "Hidden: " + (byOthers ? "rows nobody else decided (By others is ticked)" : "Coordinated and Ignored rows (tick Show all to see them)");
 
                 int pending = DeferredQueue.PendingCount;
                 PendingText.Text = pending > 0 ? "(" + pending + " queued)" : "";
@@ -850,6 +863,10 @@ namespace LiveClash.UI
                 case "Model":        return head.ModelName ?? "";
                 case "Status":       return head.StatusText ?? "";
                 case "Note":         return head.NoteText ?? "";
+                case "Issue":        return head.IssueNoText ?? "";
+                case "Assigned":     return head.AssignedText ?? "";
+                case "Held by":      return head.HeldByText ?? "";
+                case "Group":        return head.ScheduleGroupText ?? "";
                 default:             return "";
             }
         }
@@ -1238,6 +1255,7 @@ namespace LiveClash.UI
                     if (row != null && !row.IsResolved) rows.Add(row);
                 }
                 if (rows.Count == 0) { SetStatus("Select an issue first."); return; }
+                if (TriageLoading(true)) return;
 
                 var win = new NoteWindow(
                     rows.Count == 1
@@ -1253,13 +1271,23 @@ namespace LiveClash.UI
                 // header's status here would downgrade already-decided members back to whatever
                 // the worst one was, and silently drop the note for an undecided ("New") row
                 // even though this method just told the user it was saved.
-                foreach (var row in rows)
-                    ClashStatusStore.Instance.SetNote(row.Keys(), win.Note);
+                // A pair with a marker takes its note through the marker (spec 6.7); the others keep the ledger.
+                var allKeys = rows.SelectMany(r => r.Keys()).Distinct().ToList();
+                var markerKeys = MarkerKeysOf(allKeys);
+                var ledgerKeys = allKeys.Where(k => !markerKeys.Contains(k)).ToList();
+                // Marker path first, the rows without a marker only after it succeeded (delta review D-L2).
+                if (markerKeys.Count == 0)
+                {
+                    if (ledgerKeys.Count > 0) ClashStatusStore.Instance.SetNote(ledgerKeys, win.Note);
+                }
+                else SetNoteThenLedger(markerKeys, ledgerKeys, win.Note);
 
                 Refresh();
-                SetStatus(string.IsNullOrEmpty(win.Note)
-                    ? "Note cleared."
-                    : "Note saved on " + rows.Count + " issue(s).");
+                // Markers say for themselves how it went; this line is only for a ledger-only note.
+                if (markerKeys.Count == 0)
+                    SetStatus(string.IsNullOrEmpty(win.Note)
+                        ? "Note cleared."
+                        : "Note saved on " + rows.Count + " issue(s).");
             }
             catch (Exception ex)
             {
@@ -1282,21 +1310,33 @@ namespace LiveClash.UI
         {
             try
             {
-                var win = new NoteWindow(
-                    "Why " + (kind == ClashStatusKind.Coordinated ? "coordinated" : "ignored") + "?  ("
-                        + issues + " issue" + (issues == 1 ? "" : "s") + ")",
-                    "")
-                { Owner = Window.GetWindow(this) };
-
-                if (win.ShowDialog() != true) return;          // no reason given; the mark stands
-                if (string.IsNullOrWhiteSpace(win.Note)) return;
-
-                ClashStatusStore.Instance.Set(keys, kind, win.Note);
+                var note = AskReason(kind, issues);
+                if (string.IsNullOrWhiteSpace(note)) return;     // no reason given; the mark stands
+                ClashStatusStore.Instance.Set(keys, kind, note);
             }
             catch (Exception ex)
             {
                 // A failed prompt must not undo a decision that is already recorded.
                 Log.Warn("Reason prompt failed; the status itself is saved", ex);
+            }
+        }
+
+        /// <summary>The "Why coordinated / ignored?" question: the reason typed, or null when the dialog was dismissed.</summary>
+        private string AskReason(ClashStatusKind kind, int issues)
+        {
+            try
+            {
+                var win = new NoteWindow(
+                    "Why " + (kind == ClashStatusKind.Coordinated ? "coordinated" : "ignored") + "?  ("
+                        + issues + " issue" + (issues == 1 ? "" : "s") + ")",
+                    "")
+                { Owner = Window.GetWindow(this) };
+                return win.ShowDialog() == true ? win.Note : null;
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("Reason prompt failed", ex);
+                return null;
             }
         }
 
@@ -1324,6 +1364,7 @@ namespace LiveClash.UI
                 }
 
                 if (keys.Count == 0) { SetStatus("Select an issue first."); return; }
+                if (TriageLoading(false)) return;
 
                 // THE DECISION IS RECORDED FIRST, before any dialog.
                 //
@@ -1333,13 +1374,29 @@ namespace LiveClash.UI
                 // decision: if the write waited on the dialog, dismissing it would
                 // silently discard the mark, and the user would have every reason to
                 // believe it had been saved. Status first, reason second.
-                ClashStatusStore.Instance.Set(keys, kind);
+                // A pair with a marker takes its status through the marker (spec 6.7), which writes the ledger itself; the others
+                // keep today's ledger-only path.
+                var markerKeys = MarkerKeysOf(keys);
+                var ledgerKeys = keys.Where(k => !markerKeys.Contains(k)).ToList();
+                bool needsReason = kind == ClashStatusKind.Coordinated || kind == ClashStatusKind.Ignored;
 
-                if (kind == ClashStatusKind.Coordinated || kind == ClashStatusKind.Ignored)
+                // With a marker, the status and its reason go in ONE call: one transaction, one Undo, and a marker someone holds keeps both as one
+                // pending entry (review M1). So the reason is asked first; dismissing the dialog is still a valid answer, and the status then goes
+                // without one. With no marker, today's order stands: the decision first, the reason second.
+                string reason = markerKeys.Count > 0 && needsReason ? AskReason(kind, issues) : null;
+
+                // The marker path goes FIRST when there is one, and rows without a marker are written only after it succeeded: if it says no,
+                // nothing is written anywhere, so "NOT recorded" is true for every row (delta review D-L2).
+                if (markerKeys.Count == 0) WriteLedgerStatus(ledgerKeys, kind, reason);
+                else SetStatusThenLedger(markerKeys, ledgerKeys, kind, reason);
+
+                if (needsReason && markerKeys.Count == 0)
                     PromptForReason(keys, kind, issues);
 
                 Refresh();
 
+                // Markers say for themselves how it went (some may be pending); the summary is only for a ledger-only mark.
+                if (markerKeys.Count == 0)
                 SetStatus(issues + " issue" + (issues == 1 ? "" : "s") + " ("
                     + keys.Count + " clash" + (keys.Count == 1 ? "" : "es") + ") marked "
                     + kind + (kind == ClashStatusKind.Coordinated || kind == ClashStatusKind.Ignored
@@ -1372,6 +1429,8 @@ namespace LiveClash.UI
         /// </summary>
         private void ResultList_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
+            UpdateScheduleSelectionUi();
+
             // Putting selection back after a rebuild must not look like a click.
             if (_restoringView) return;
             if (_showEvent == null || ResultList.SelectedItems.Count == 0) return;

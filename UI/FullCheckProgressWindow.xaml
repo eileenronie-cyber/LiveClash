@@ -20,7 +20,7 @@
   <!-- This window lives on its OWN thread (see FullCheckProgress): the sweep blocks Revit's thread, and a
        window on that thread could not repaint until the sweep was over. -->
   <StackPanel Margin="22,20,22,18">
-    <TextBlock Text="Full check" FontSize="15" FontWeight="SemiBold"/>
+    <TextBlock x:Name="Heading" Text="Full check" FontSize="15" FontWeight="SemiBold"/>
     <TextBlock x:Name="StageText" Foreground="{DynamicResource TextSec}" Margin="0,4,0,14"
                Text="Getting ready…" TextWrapping="Wrap"/>
 

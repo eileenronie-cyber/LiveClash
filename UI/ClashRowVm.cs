@@ -120,11 +120,54 @@ namespace LiveClash.UI
         {
             get
             {
+                // The schedule adds who decided it when that is someone else, and "(pending)" for a triage the model has
+                // not taken yet; with no schedule attached the cells are empty and this is the plain status.
+                return RowScheduleText.StatusText(PlainStatusText, Sched);
+            }
+        }
+
+        private string PlainStatusText
+        {
+            get
+            {
                 if (IsResolved) return "Resolved";
                 if (IsReopened) return "Reopened";
                 return Status.ToString();
             }
         }
+
+        // ------------------------------------------------------------- clash schedule (markers)
+
+        /// <summary>
+        /// Where the rows read the clash schedule's snapshot from; set by the panel while a schedule is attached.
+        /// One panel per session, so one source.
+        /// </summary>
+        internal static System.Func<ScheduleSnapshot> ScheduleSource;
+
+        private RowScheduleCells _sched;
+
+        private static ScheduleSnapshot Snapshot { get { var source = ScheduleSource; return source == null ? null : source(); } }
+
+        /// <summary>This row's schedule cells; a group row holds all its pairs' markers together. Read once per row.</summary>
+        public RowScheduleCells Sched
+        {
+            get { return _sched ?? (_sched = RowScheduleText.ForKeys(Snapshot, Keys())); }
+        }
+
+        public string IssueNoText { get { return Sched.IssueNo; } }
+        public string AssignedText { get { return Sched.Assigned; } }
+        public string HeldByText { get { return Sched.HeldBy; } }
+        public string ScheduleGroupText { get { return Sched.Group; } }
+        public string PendingTip { get { return Sched.PendingTooltip; } }
+
+        /// <summary>The Status cell's tooltip: the pending triage's explanation, else the whole status (it may be cut).</summary>
+        public string StatusTip { get { return Sched.PendingTooltip.Length > 0 ? Sched.PendingTooltip : StatusText; } }
+
+        /// <summary>Issue numbers (merged ones too) and assignees, for the panel's search box.</summary>
+        public string ScheduleSearchText { get { return RowScheduleText.SearchTextOf(Snapshot, Keys()); } }
+
+        /// <summary>For the "decided by others" filter.</summary>
+        public bool DecidedByOthers { get { return RowScheduleText.DecidedByOthersAny(Snapshot, Keys()); } }
 
         /// <summary>Why the decision was made. Shown in its own column.</summary>
         public string NoteText

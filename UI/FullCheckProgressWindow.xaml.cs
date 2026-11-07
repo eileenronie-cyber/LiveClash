@@ -18,6 +18,20 @@ namespace LiveClash.UI
             ThemeManager.Attach(this);
         }
 
+        // What this window says while work is going on, and what it counts. A full check is the default; the clash-schedule plan sets its own.
+        private string _work = "Checking your model against your filter…";
+        private string _unit = "elements";
+
+        /// <summary>Which job this window is for: its title bar, its heading, the line under it while work goes on, and what it counts.</summary>
+        public void SetKind(string windowTitle, string heading, string work, string unit)
+        {
+            Title = windowTitle ?? Title;
+            Heading.Text = heading ?? Heading.Text;
+            _work = work ?? _work;
+            _unit = unit ?? _unit;
+            StageText.Text = _work;
+        }
+
         /// <summary>The line under the title: what the check is doing right now.</summary>
         public void SetStage(string text)
         {
@@ -38,8 +52,8 @@ namespace LiveClash.UI
             int percent = total > 0 ? (int)(done * 100L / total) : 0;
             Bar.Value = percent;
             PercentText.Text = percent + "%";
-            CountText.Text = done.ToString("N0") + " of " + total.ToString("N0") + " elements";
-            StageText.Text = done >= total && total > 0 ? "Finishing up…" : "Checking your model against your filter…";
+            CountText.Text = done.ToString("N0") + " of " + total.ToString("N0") + " " + _unit;
+            StageText.Text = done >= total && total > 0 ? "Finishing up…" : _work;
 
             string t = Clock(elapsedMs) + " elapsed";
             if (remainingMs >= 0 && done > 0 && done < total)
